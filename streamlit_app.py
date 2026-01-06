@@ -15,7 +15,7 @@ def load_spacy_model():
     try:
         return spacy.load("en_core_web_sm")
     except OSError:
-        st.error("⚠️ spaCy model not found. Please run: python -m spacy download en_core_web_sm")
+        # Return None if model not found - we'll show error message later
         return None
 
 # Load model at startup
