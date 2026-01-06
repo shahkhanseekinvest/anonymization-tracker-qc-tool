@@ -2,6 +2,15 @@ import streamlit as st
 import pandas as pd
 import re
 from typing import List, Dict, Tuple, Optional
+
+# Import new hierarchical detection framework
+from check_framework import detect_with_hierarchy, validate_not_in_before_column, validate_not_equal, validate_length_preserved
+from pattern_detectors import (
+    detect_cik, detect_ein, detect_sec_file_number,
+    detect_cusip, detect_isin, detect_sedol, detect_ticker,
+    detect_figi, detect_lei, detect_patent,
+    detect_email, detect_phone, detect_address, detect_company_name
+)
 # -------------------------
 # Shared context gates
 # -------------------------
@@ -396,56 +405,54 @@ def check_deletion_entries(df: pd.DataFrame) -> Dict:
 
 def check_patent_ids(df: pd.DataFrame) -> Dict:
     """
-    Two-stage check for patent identifiers.
+    Two-stage check for patent identifiers (REFACTORED - hierarchical detection).
 
-    Patent IDs are detected globally (not category-gated) because they
-    frequently appear in legal, technical, and narrative text outside
-    COMPANY INFO. This is an intentional exception to the
-    Detect → Context → Enforce pattern used for first-class identifiers.
+    Patent IDs use Pattern B (global detection) because they frequently appear
+    in legal, technical, and narrative text outside COMPANY INFO categories.
     """
-    patent_pattern = r'\b(US|EP|WO|JP|CN|DE|GB|FR)\s?\d{6,10}\b'
-    
-    # Stage 1: Check if any patent IDs exist
-    has_patents = False
-    detected = []
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']) if pd.notna(row['Before']) else ''
-        if re.search(patent_pattern, before_val, re.IGNORECASE):
-            has_patents = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': row['Category'],
-                'before': row['Before'],
-                'after': row['After']
-            })
-    
-    if not has_patents:
+
+    # STAGE 1: Detection with hierarchical framework (global pattern)
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="PATENT",
+        pattern_detector=detect_patent,
+        use_context=False  # Pattern B: global detection (no context required)
+    )
+
+    if not detected:
         return {
             'passed': False,
             'message': 'No patent numbers detected (e.g., US1234567, WO2020123456)',
             'severity': 'warning',
             'rows': []
         }
-    
-    # Stage 2: Check After values for problems
+
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(df['Before'].dropna().astype(str).str.upper())
-    
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']) if pd.notna(row['Before']) else ''
+    patent_pattern = r'\b(US|EP|WO|JP|CN|DE|GB|FR)\s?\d{6,10}\b'
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before'])
         after_val = str(row['After']) if pd.notna(row['After']) else ''
-        
-        if re.search(patent_pattern, before_val, re.IGNORECASE) and after_val:
-            problem = None
-            
-            # Check 1: After contains a real patent ID from Before column
-            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
-                problem = f"After value '{after_val}' is a real patent ID from Before column"
-            
-            # Check 2: Format mismatch - patent IDs should maintain structure
-            before_match = re.search(patent_pattern, before_val, re.IGNORECASE)
-            after_match = re.search(patent_pattern, after_val, re.IGNORECASE)
-            
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        # Check 1: After contains a real patent ID from Before column
+        if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+            problem = f"After value '{after_val}' is a real patent ID from Before column"
+
+        # Check 2: Format mismatch - patent IDs should maintain structure
+        before_match = re.search(patent_pattern, before_val, re.IGNORECASE)
+        after_match = re.search(patent_pattern, after_val, re.IGNORECASE)
+
+        if not problem:
             if before_match and not after_match:
                 problem = f"Format mismatch: After doesn't follow patent ID format"
             elif before_match and after_match:
@@ -454,16 +461,16 @@ def check_patent_ids(df: pd.DataFrame) -> Dict:
                 if before_digits and after_digits:
                     if len(before_digits[0]) != len(after_digits[0]):
                         problem = f"Format mismatch: Patent number length changed from {len(before_digits[0])} to {len(after_digits[0])} digits"
-            
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': row['Category'],
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
-    
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
     return {
         'passed': len(issues) == 0,
         'message': f'All patent numbers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'Found {len(issues)} patent number(s) with anonymization problems',
@@ -477,62 +484,56 @@ def looks_like_cik(value: str) -> bool:
     return bool(value and CIK_REGEX.match(value))
 
 def check_cik_ids(df: pd.DataFrame) -> Dict:
-    """Two-stage check for CIK numbers"""
-    
-    # Stage 1: Check if any CIKs exist
-    has_cik = False
-    detected = []
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK"):
-            has_cik = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-    
-    if not has_cik:
+    """Two-stage check for CIK numbers (REFACTORED - hierarchical detection)"""
+
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="CIK",
+        pattern_detector=detect_cik,
+        use_context=True  # Pattern A: context-based detection
+    )
+
+    if not detected:
         return {
             'passed': False,
             'message': 'No CIK numbers detected (SEC company IDs like 0001018724)',
             'severity': 'warning',
             'rows': []
         }
-    
-    # Stage 2: Check After values
+
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(df['Before'].dropna().astype(str).str.lower())
-    
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK") and after_val:
-            problem = None
-            
-            if after_val.lower() in before_values and after_val.lower() != before_val.lower():
-                problem = f"After CIK '{after_val}' is a real identifier from Before column"
-            elif not after_val.isdigit():
-                problem = f"After value is not a valid CIK format (should be numeric)"
-            elif len(before_val) != len(after_val):
-                problem = f"CIK length mismatch: {len(before_val)} digits → {len(after_val)} digits"
-            
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
-    
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        if after_val.lower() in before_values and after_val.lower() != before_val.lower():
+            problem = f"After CIK '{after_val}' is a real identifier from Before column"
+        elif not after_val.isdigit():
+            problem = f"After value is not a valid CIK format (should be numeric)"
+        elif len(before_val) != len(after_val):
+            problem = f"CIK length mismatch: {len(before_val)} digits → {len(after_val)} digits"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
     return {
         'passed': len(issues) == 0,
         'message': f'All CIK numbers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} CIK(s) with problems',
@@ -541,63 +542,59 @@ def check_cik_ids(df: pd.DataFrame) -> Dict:
     }
 
 def check_isin_ids(df: pd.DataFrame) -> Dict:
-    """Two-stage check for ISIN codes - handles spaces in real-world formats"""
-    
-    # Stage 1: Check if any ISINs exist
-    has_isin = False
-    detected = []
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "ISIN") and detect_isin(before_val):
-            has_isin = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-    
-    if not has_isin:
+    """Two-stage check for ISIN codes (REFACTORED - hierarchical detection)"""
+
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="ISIN",
+        pattern_detector=detect_isin,
+        use_context=True  # Pattern A: context-based detection
+    )
+
+    if not detected:
         return {
             'passed': False,
             'message': 'No ISIN codes detected (international security IDs like US0378331005)',
             'severity': 'warning',
             'rows': []
         }
-    
-    # Stage 2: Check After values
+
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(detect_isin(str(v)) for v in df['Before'].dropna() if detect_isin(str(v)))
-    
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        
+
+        if not after_val:
+            continue
+
         normalized_before = detect_isin(before_val)
-        if security_id_context_applies(category) and normalized_before and after_val:
-            problem = None
-            normalized_after = detect_isin(after_val)
-            
-            if not normalized_after:
-                problem = f"After value doesn't match ISIN format (should be 2 letters + 9 alphanumeric + 1 digit)"
-            elif normalized_after in before_values and normalized_after != normalized_before:
-                problem = f"After ISIN '{after_val}' is a real identifier from Before column"
-            elif len(normalized_before) != len(normalized_after):
-                problem = f"ISIN length mismatch: {len(normalized_before)} → {len(normalized_after)} characters"
-            
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
-    
+        normalized_after = detect_isin(after_val)
+
+        problem = None
+
+        if not normalized_after:
+            problem = f"After value doesn't match ISIN format (should be 2 letters + 9 alphanumeric + 1 digit)"
+        elif normalized_after in before_values and normalized_after != normalized_before:
+            problem = f"After ISIN '{after_val}' is a real identifier from Before column"
+        elif len(normalized_before) != len(normalized_after):
+            problem = f"ISIN length mismatch: {len(normalized_before)} → {len(normalized_after)} characters"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
     return {
         'passed': len(issues) == 0,
         'message': f'All ISIN codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} ISIN(s) with problems',
@@ -606,64 +603,59 @@ def check_isin_ids(df: pd.DataFrame) -> Dict:
     }
 
 def check_cusip_ids(df: pd.DataFrame) -> Dict:
-    """Two-stage check for CUSIP codes - handles spaces in real-world formats"""
-    
-    # Stage 1: Check if any CUSIPs exist
-    has_cusip = False
-    detected = []
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if security_id_context_applies(category) and detect_cusip(before_val) and security_id_comment_allows_detection(comment, "CUSIP"):
-            has_cusip = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-    
-    if not has_cusip:
+    """Two-stage check for CUSIP codes (REFACTORED - hierarchical detection)"""
+
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="CUSIP",
+        pattern_detector=detect_cusip,
+        use_context=True  # Pattern A: context-based detection
+    )
+
+    if not detected:
         return {
             'passed': False,
             'message': 'No CUSIP codes detected (US/Canada security IDs like 037833100)',
             'severity': 'warning',
             'rows': []
         }
-    
-    # Stage 2: Check After values
+
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(detect_cusip(str(v)) for v in df['Before'].dropna() if detect_cusip(str(v)))
-    
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
+
+        if not after_val:
+            continue
+
         normalized_before = detect_cusip(before_val)
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CUSIP") and normalized_before and after_val:
-            problem = None
-            normalized_after = detect_cusip(after_val)
-            
-            if not normalized_after:
-                problem = f"After value doesn't match CUSIP format (should be 9 characters: 3 digits + 5 alphanumeric + 1 digit)"
-            elif normalized_after in before_values and normalized_after != normalized_before:
-                problem = f"After CUSIP '{after_val}' is a real identifier from Before column"
-            elif len(normalized_before) != len(normalized_after):
-                problem = f"CUSIP length mismatch: {len(normalized_before)} → {len(normalized_after)} characters"
-            
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
-    
+        normalized_after = detect_cusip(after_val)
+
+        problem = None
+
+        if not normalized_after:
+            problem = f"After value doesn't match CUSIP format (should be 9 characters: 3 digits + 5 alphanumeric + 1 digit)"
+        elif normalized_after in before_values and normalized_after != normalized_before:
+            problem = f"After CUSIP '{after_val}' is a real identifier from Before column"
+        elif len(normalized_before) != len(normalized_after):
+            problem = f"CUSIP length mismatch: {len(normalized_before)} → {len(normalized_after)} characters"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
     return {
         'passed': len(issues) == 0,
         'message': f'All CUSIP codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} CUSIP(s) with problems',
@@ -672,61 +664,56 @@ def check_cusip_ids(df: pd.DataFrame) -> Dict:
     }
 
 def check_sedol_ids(df: pd.DataFrame) -> Dict:
-    """Two-stage check for SEDOL codes"""
-    
-    # Stage 1: Check if any SEDOLs exist
-    has_sedol = False
-    detected = []
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEDOL") and detect_sedol(before_val):
-            has_sedol = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-    
-    if not has_sedol:
+    """Two-stage check for SEDOL codes (REFACTORED - hierarchical detection)"""
+
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="SEDOL",
+        pattern_detector=detect_sedol,
+        use_context=True  # Pattern A: context-based detection
+    )
+
+    if not detected:
         return {
             'passed': False,
             'message': 'No SEDOL codes detected (UK security IDs like 2046251)',
             'severity': 'warning',
             'rows': []
         }
-    
-    # Stage 2: Check After values
+
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(df['Before'].dropna().astype(str).str.upper())
-    
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        
-        if security_id_context_applies(category) and detect_sedol(before_val) and after_val:
-            problem = None
-            
-            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
-                problem = f"After SEDOL '{after_val}' is a real identifier from Before column"
-            elif not re.match(r'^[B-DF-HJ-NP-TV-Z0-9]{6}[0-9]$', after_val):
-                problem = f"After value doesn't match SEDOL format (7 characters)"
-            elif len(before_val) != len(after_val):
-                problem = f"SEDOL length mismatch: {len(before_val)} → {len(after_val)} characters"
-            
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
-    
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+            problem = f"After SEDOL '{after_val}' is a real identifier from Before column"
+        elif not detect_sedol(after_val):
+            problem = f"After value doesn't match SEDOL format (7 characters)"
+        elif len(before_val) != len(after_val):
+            problem = f"SEDOL length mismatch: {len(before_val)} → {len(after_val)} characters"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
     return {
         'passed': len(issues) == 0,
         'message': f'All SEDOL codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} SEDOL(s) with problems',
@@ -739,25 +726,17 @@ def check_sedol_ids(df: pd.DataFrame) -> Dict:
 # -------------------------
 
 def check_ein_ids(df: pd.DataFrame) -> Dict:
-    """Two-stage check for EINs"""
-    has_ein = False
-    detected = []
+    """Two-stage check for EINs (REFACTORED - hierarchical detection)"""
 
-    for idx, row in df.iterrows():
-        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="EIN",
+        pattern_detector=detect_ein,
+        use_context=True  # Pattern A: context-based detection
+    )
 
-        if looks_like_ein(before) and ein_context_applies(category, comment):
-            has_ein = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-
-    if not has_ein:
+    if not detected:
         return {
             'passed': False,
             'message': 'No EIN numbers detected (tax IDs like 12-3456789)',
@@ -765,22 +744,28 @@ def check_ein_ids(df: pd.DataFrame) -> Dict:
             'rows': []
         }
 
+    # STAGE 2: Enforcement (validate After column)
     issues = []
-    for idx, row in df.iterrows():
-        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        after = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_ein(before) and ein_context_applies(category, comment) and after:
-            for issue in validate_ein_anonymization(before, after):
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': issue
-                })
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before = str(row['Before']).strip()
+        after = str(row['After']).strip() if pd.notna(row['After']) else ''
+
+        if not after:
+            continue
+
+        # Use existing validation function
+        for issue in validate_ein_anonymization(before, after):
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': issue
+            })
 
     return {
         'passed': len(issues) == 0,
@@ -790,25 +775,17 @@ def check_ein_ids(df: pd.DataFrame) -> Dict:
     }
 
 def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
-    """Two-stage check for SEC file numbers"""
-    has_sec_file = False
-    detected = []
+    """Two-stage check for SEC file numbers (REFACTORED - hierarchical detection)"""
 
-    for idx, row in df.iterrows():
-        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="SEC_FILE",
+        pattern_detector=detect_sec_file_number,
+        use_context=True  # Pattern A: context-based detection
+    )
 
-        if looks_like_sec_file_number(before) and sec_file_context_applies(category, comment):
-            has_sec_file = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-
-    if not has_sec_file:
+    if not detected:
         return {
             'passed': False,
             'message': 'No SEC file numbers detected (filing IDs like 001-12345)',
@@ -816,22 +793,28 @@ def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
             'rows': []
         }
 
+    # STAGE 2: Enforcement (validate After column)
     issues = []
-    for idx, row in df.iterrows():
-        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        after = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_sec_file_number(before) and sec_file_context_applies(category, comment) and after:
-            for issue in validate_sec_file_anonymization(before, after):
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': issue
-                })
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before = str(row['Before']).strip()
+        after = str(row['After']).strip() if pd.notna(row['After']) else ''
+
+        if not after:
+            continue
+
+        # Use existing validation function
+        for issue in validate_sec_file_anonymization(before, after):
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': issue
+            })
 
     return {
         'passed': len(issues) == 0,
@@ -950,30 +933,17 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
     return True
 
 def check_ticker_symbols(df: pd.DataFrame) -> Dict:
-    """Two-stage check for stock ticker symbols with strict context gating."""
-    has_ticker = False
-    detected = []
+    """Two-stage check for stock ticker symbols (REFACTORED - hierarchical detection)"""
 
-    # Stage 1: Detection with context + Comment gating (File no longer blocks detection)
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="TICKER",
+        pattern_detector=detect_ticker,
+        use_context=True  # Pattern A: context-based detection (strict)
+    )
 
-        if (
-            ticker_context_applies(category)
-            and re.match(r'^[A-Z]{1,5}$', before_val)
-            and ticker_comment_allows_detection(comment)
-        ):
-            has_ticker = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After'],
-            })
-
-    if not has_ticker:
+    if not detected:
         return {
             'passed': False,
             'message': 'No stock tickers detected (e.g., AAPL, MSFT, GOOGL)',
@@ -981,112 +951,96 @@ def check_ticker_symbols(df: pd.DataFrame) -> Dict:
             'rows': []
         }
 
-    # Stage 2: Enforcement
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(df['Before'].dropna().astype(str).str.upper())
 
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        file_val = str(row.get('File', '')) if 'File' in df.columns else ''
 
-        if (
-            ticker_context_applies(category)
-            and re.match(r'^[A-Z]{1,5}$', before_val)
-            and ticker_comment_allows_detection(comment)
-            and after_val
-        ):
-            problem = None
+        if not after_val:
+            continue
 
-            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
-                problem = f"After ticker '{after_val}' is a real identifier from Before column"
-            elif not re.match(r'^[A-Z]{1,5}$', after_val):
-                problem = f"After value doesn't match ticker format (1–5 uppercase letters)"
-            elif abs(len(before_val) - len(after_val)) > 1:
-                problem = f"Ticker length changed significantly: {len(before_val)} → {len(after_val)} characters"
+        problem = None
 
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
+        if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+            problem = f"After ticker '{after_val}' is a real identifier from Before column"
+        elif not re.match(r'^[A-Z]{1,5}$', after_val):
+            problem = f"After value doesn't match ticker format (1–5 uppercase letters)"
+        elif abs(len(before_val) - len(after_val)) > 1:
+            problem = f"Ticker length changed significantly: {len(before_val)} → {len(after_val)} characters"
 
-    if issues:
-        return {
-            'passed': False,
-            'message': f'Found {len(issues)} stock ticker(s) with anonymization problems',
-            'severity': 'error',
-            'rows': issues
-        }
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
 
     return {
-        'passed': True,
-        'message': f'All stock tickers anonymized correctly ({len(detected)} found)',
-        'severity': 'pass',
-        'rows': detected
+        'passed': len(issues) == 0,
+        'message': f'All stock tickers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'Found {len(issues)} stock ticker(s) with anonymization problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
     }
 
 def check_figi_ids(df: pd.DataFrame) -> Dict:
-    """Two-stage check for FIGI codes (Financial Instrument Global Identifier) - BBG prefix"""
-    # Stage 1: Check if any FIGIs exist
-    has_figi = False
-    detected = []
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if security_id_context_applies(category) and detect_figi(before_val) and security_id_comment_allows_detection(comment, "FIGI"):
-            has_figi = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-    
-    if not has_figi:
+    """Two-stage check for FIGI codes (REFACTORED - hierarchical detection)"""
+
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="FIGI",
+        pattern_detector=detect_figi,
+        use_context=True  # Pattern A: context-based detection
+    )
+
+    if not detected:
         return {
             'passed': False,
             'message': 'No FIGI codes detected (Bloomberg IDs like BBG000BLNQ16)',
             'severity': 'warning',
             'rows': []
         }
-    
-    # Stage 2: Check After values
+
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(df['Before'].dropna().astype(str).str.upper())
-    
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "FIGI") and detect_figi(before_val) and after_val:
-            problem = None
-            
-            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
-                problem = f"After FIGI '{after_val}' is a real identifier from Before column"
-            elif not re.match(r'^BBG[A-Z0-9]{9}$', after_val):
-                problem = f"After value doesn't match FIGI format (BBG + 9 alphanumeric characters)"
-            elif len(before_val) != len(after_val):
-                problem = f"FIGI length mismatch: {len(before_val)} → {len(after_val)} characters"
-            
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
-    
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+            problem = f"After FIGI '{after_val}' is a real identifier from Before column"
+        elif not detect_figi(after_val):
+            problem = f"After value doesn't match FIGI format (BBG + 9 alphanumeric characters)"
+        elif len(before_val) != len(after_val):
+            problem = f"FIGI length mismatch: {len(before_val)} → {len(after_val)} characters"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
     return {
         'passed': len(issues) == 0,
         'message': f'All FIGI codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} FIGI(s) with problems',
@@ -1095,61 +1049,56 @@ def check_figi_ids(df: pd.DataFrame) -> Dict:
     }
 
 def check_lei_ids(df: pd.DataFrame) -> Dict:
-    """Two-stage check for LEI codes (Legal Entity Identifier)"""
-    
-    # Stage 1: Check if any LEIs exist
-    has_lei = False
-    detected = []
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
-        
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "LEI") and detect_lei(before_val):
-            has_lei = True
-            detected.append({
-                'excel_row': idx + 2,
-                'category': category,
-                'before': row['Before'],
-                'after': row['After']
-            })
-    
-    if not has_lei:
+    """Two-stage check for LEI codes (REFACTORED - hierarchical detection)"""
+
+    # STAGE 1: Detection with hierarchical framework
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="LEI",
+        pattern_detector=detect_lei,
+        use_context=True  # Pattern A: context-based detection
+    )
+
+    if not detected:
         return {
             'passed': False,
             'message': 'No LEI codes detected (legal entity IDs, 20 characters)',
             'severity': 'warning',
             'rows': []
         }
-    
-    # Stage 2: Check After values
+
+    # STAGE 2: Enforcement (validate After column)
     issues = []
     before_values = set(df['Before'].dropna().astype(str).str.upper())
-    
-    for idx, row in df.iterrows():
-        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
-        category = str(row['Category']) if pd.notna(row['Category']) else ''
-        
-        if security_id_context_applies(category) and detect_lei(before_val) and after_val:
-            problem = None
-            
-            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
-                problem = f"After LEI '{after_val}' is a real identifier from Before column"
-            elif not re.match(r'^[A-Z0-9]{20}$', after_val):
-                problem = f"After value doesn't match LEI format (20 alphanumeric characters)"
-            elif len(before_val) != len(after_val):
-                problem = f"LEI length mismatch: {len(before_val)} → {len(after_val)} characters"
-            
-            if problem:
-                issues.append({
-                    'excel_row': idx + 2,
-                    'category': category,
-                    'before': row['Before'],
-                    'after': row['After'],
-                    'problem': problem
-                })
-    
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+            problem = f"After LEI '{after_val}' is a real identifier from Before column"
+        elif not detect_lei(after_val):
+            problem = f"After value doesn't match LEI format (20 alphanumeric characters)"
+        elif len(before_val) != len(after_val):
+            problem = f"LEI length mismatch: {len(before_val)} → {len(after_val)} characters"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
     return {
         'passed': len(issues) == 0,
         'message': f'All LEI codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} LEI(s) with problems',
@@ -1161,14 +1110,251 @@ def check_retail_labels(df: pd.DataFrame) -> Dict:
     """Check if retail-related labels exist - warn if none found"""
     retail_terms = ['retail', 'franchise', 'store', 'branch', 'outlet', 'shop']
     category_col = df['Category'].astype(str).str.lower()
-    
+
     has_retail = any(category_col.str.contains(term, na=False).any() for term in retail_terms)
-    
+
     return {
         'passed': has_retail,
         'message': f'Found {retail_count} retail/franchise categories' if has_retail else '⚠️ No retail/store/franchise categories found - consider if multi-location identifiers need anonymization',
         'severity': 'pass' if has_retail else 'warning',
         'rows': []
+    }
+
+# ============================================================================
+# NEW CHECKS: Email, Phone, Address, Company Name
+# ============================================================================
+
+def check_email_addresses(df: pd.DataFrame) -> Dict:
+    """Two-stage check for email addresses (Pattern B - GLOBAL DETECTION)"""
+
+    # STAGE 1: Detection with hierarchical framework (global pattern)
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="EMAIL",
+        pattern_detector=detect_email,
+        use_context=False  # Pattern B: global detection (like patents)
+    )
+
+    if not detected:
+        return {
+            'passed': False,
+            'message': 'No email addresses detected',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    # STAGE 2: Enforcement (validate After column)
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.lower())
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        # Check if After is a valid email
+        if not detect_email(after_val):
+            problem = f"After value doesn't match email format"
+        elif after_val.lower() in before_values and after_val.lower() != before_val.lower():
+            problem = f"After email '{after_val}' is a real email from Before column"
+        # Check domain anonymization
+        elif '@' in before_val and '@' in after_val:
+            before_domain = before_val.split('@')[1].lower()
+            after_domain = after_val.split('@')[1].lower()
+            if before_domain == after_domain:
+                problem = f"Email domain not anonymized ('{before_domain}' appears in both)"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All email addresses anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} email(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+
+def check_phone_numbers(df: pd.DataFrame) -> Dict:
+    """Two-stage check for phone numbers (Pattern A - STRICT CONTEXT)"""
+
+    # STAGE 1: Detection with hierarchical framework (strict context)
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="PHONE",
+        pattern_detector=detect_phone,
+        use_context=True  # Pattern A: strict context required
+    )
+
+    if not detected:
+        return {
+            'passed': False,
+            'message': 'No phone numbers detected',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    # STAGE 2: Enforcement (validate After column)
+    issues = []
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        if not detect_phone(after_val):
+            problem = f"After value doesn't match phone number format"
+        elif before_val == after_val:
+            problem = f"Phone number not anonymized (Before == After)"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All phone numbers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} phone(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+
+def check_addresses(df: pd.DataFrame) -> Dict:
+    """Two-stage check for addresses (Pattern A - MODERATE CONTEXT)"""
+
+    # STAGE 1: Detection with hierarchical framework (moderate context)
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="ADDRESS",
+        pattern_detector=detect_address,
+        use_context=True  # Pattern A: moderate context required
+    )
+
+    if not detected:
+        return {
+            'passed': False,
+            'message': 'No addresses detected',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    # STAGE 2: Enforcement (validate After column)
+    issues = []
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        if before_val == after_val:
+            problem = f"Address not anonymized (Before == After)"
+        # Check for common address components
+        elif any(comp in after_val.upper() for comp in ['STREET', 'AVE', 'ROAD', 'BLVD'] if comp in before_val.upper()):
+            problem = f"Address contains original street type identifiers"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All addresses anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} address(es) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+
+def check_company_names(df: pd.DataFrame) -> Dict:
+    """Two-stage check for company names (Pattern A - STRICT CONTEXT)"""
+
+    # STAGE 1: Detection with hierarchical framework (strict context)
+    detected = detect_with_hierarchy(
+        df=df,
+        check_name="COMPANY_NAME",
+        pattern_detector=detect_company_name,
+        use_context=True  # Pattern A: strict context required
+    )
+
+    if not detected:
+        return {
+            'passed': False,
+            'message': 'No company names detected',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    # STAGE 2: Enforcement (validate After column)
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.lower())
+
+    for item in detected:
+        idx = item['excel_row'] - 2  # Convert back to 0-indexed
+        row = df.iloc[idx]
+
+        before_val = str(row['Before']).strip()
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+
+        if not after_val:
+            continue
+
+        problem = None
+
+        if after_val.lower() in before_values and after_val.lower() != before_val.lower():
+            problem = f"After company name '{after_val}' is a real name from Before column"
+        elif before_val == after_val:
+            problem = f"Company name not anonymized (Before == After)"
+
+        if problem:
+            issues.append({
+                'excel_row': item['excel_row'],
+                'category': item['category'],
+                'before': item['before'],
+                'after': item['after'],
+                'problem': problem
+            })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All company names anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} company name(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
     }
 
 def check_executive_honorifics(df: pd.DataFrame) -> Dict:
@@ -1473,7 +1659,7 @@ def check_numeric_consistency(df: pd.DataFrame) -> Dict:
     }
 
 def run_all_checks(df: pd.DataFrame) -> List[Dict]:
-    """Run all QC checks and return results"""
+    """Run all QC checks and return results (NOW WITH 24 TOTAL CHECKS)"""
 
     checks = [
         # Links & URLs
@@ -1499,6 +1685,12 @@ def run_all_checks(df: pd.DataFrame) -> List[Dict]:
         ("Executive Names", check_executive_honorifics),
         ("First Names Separate", check_first_names_separate_rows),
 
+        # NEW: Contact Information (4 new checks)
+        ("Email Addresses", check_email_addresses),
+        ("Phone Numbers", check_phone_numbers),
+        ("Addresses", check_addresses),
+        ("Company Names", check_company_names),
+
         # Cross-Validation
         ("Name Recycling", check_name_recycling),
         ("After in Before", check_after_in_before),
@@ -1506,13 +1698,13 @@ def run_all_checks(df: pd.DataFrame) -> List[Dict]:
         ("Deletion Entries", check_deletion_entries),
         ("Format Consistency", check_numeric_consistency)
     ]
-    
+
     results = []
     for check_name, check_func in checks:
         result = check_func(df)
         result['check_name'] = check_name
         results.append(result)
-    
+
     return results
 
 # Main app logic
@@ -1579,6 +1771,12 @@ if uploaded_file:
             "Retail Labels": "Content Validation",
             "Executive Names": "Content Validation",
             "First Names Separate": "Content Validation",
+            # NEW: Contact Information checks
+            "Email Addresses": "Contact Information",
+            "Phone Numbers": "Contact Information",
+            "Addresses": "Contact Information",
+            "Company Names": "Content Validation",
+            # Cross-Validation
             "Name Recycling": "Cross-Validation",
             "After in Before": "Cross-Validation",
             "Blank Before Check": "Cross-Validation",
