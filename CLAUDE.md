@@ -1,5 +1,30 @@
 # Anonymization Tracker QC Tool - Project Guide
 
+## 🆕 **v2.0 - Major Architecture Refactor (January 2026)**
+
+**THIS DOCUMENT REFLECTS v2.0 WITH HIERARCHICAL DETECTION FRAMEWORK**
+
+### **What Changed in v2.0**
+
+1. **New Hierarchical Detection Framework** - All checks now use a unified 3-step pattern
+2. **4 New Checks Added** - Email, Phone, Address, Company Name detection
+3. **Modular Architecture** - Code split into reusable modules
+4. **Universal Keyword System** - Centralized keyword management
+5. **24 Total Checks** (up from 20)
+
+### **New Module Structure**
+
+```
+anonymization-tracker-qc-tool/
+├── streamlit_app.py          # Main application & check functions
+├── check_keywords.py          # NEW: Universal keyword definitions
+├── check_framework.py         # NEW: Hierarchical detection framework
+├── pattern_detectors.py       # NEW: All pattern matching functions
+└── CLAUDE.md                  # This documentation file
+```
+
+---
+
 ## Project Overview
 
 **Purpose**: Streamlit-based Quality Control tool for validating anonymization trackers used in document redaction workflows.
@@ -12,9 +37,43 @@
 - Pandas (data processing)
 - Regex (pattern matching)
 
+**Total Checks**: **24** (20 original + 4 new)
+
 ---
 
-## Architecture & Key Patterns
+## Architecture & Key Patterns (v2.0)
+
+### **NEW: Hierarchical Detection Framework**
+
+**All identifier checks now follow this unified 3-step pattern:**
+
+```
+STEP 1: Comment Authority (HIGHEST PRIORITY)
+├─ PROVEN: Comment explicitly mentions this ID → Pass to Stage 2
+├─ DISPROVEN: Comment mentions different ID → Skip row
+└─ NEUTRAL: Continue to Step 2
+
+STEP 2: Pattern Match (NECESSARY CONDITION)
+├─ Before value matches identifier pattern → Continue to Step 3
+└─ Doesn't match → Skip row
+
+STEP 3: Context Confirmation (SUFFICIENT CONDITION)
+├─ Category + Comment keywords support detection → DETECTED!
+└─ No context support → Skip row
+```
+
+**Implementation:**
+```python
+# All checks use this function from check_framework.py
+detected = detect_with_hierarchy(
+    df=df,
+    check_name="CIK",              # Lookup keywords
+    pattern_detector=detect_cik,   # Pattern matching function
+    use_context=True               # Pattern A vs Pattern B
+)
+```
+
+### 1. **Old** Two-Stage Validation Pattern (Deprecated)
 
 ### 1. Two-Stage Validation Pattern (Detect → Context → Enforce)
 
@@ -384,6 +443,53 @@ A: Create a small CSV/Excel with test cases and upload via UI
 
 ---
 
+## Complete Check Reference (24 Total)
+
+### Links & URLs (2 checks)
+1. **SEC Links** - Pattern A - Validates SEC.gov URLs
+2. **After URL Leakage** - Pattern A - Ensures After URLs don't contain Before identifiers
+
+### Financial Identifiers (3 checks)
+3. **CIK Numbers** - Pattern A - SEC company IDs (7-10 digits)
+4. **EIN Numbers** - Pattern A - Tax IDs (XX-XXXXXXX or 9 digits)
+5. **SEC File Numbers** - Pattern A - SEC filing IDs (XXX-XXXXX)
+
+### Security Identifiers (6 checks)
+6. **CUSIP Codes** - Pattern A - US/Canada securities (9 chars)
+7. **ISIN Codes** - Pattern A - International securities (12 chars)
+8. **SEDOL Codes** - Pattern A - UK securities (7 chars)
+9. **Stock Tickers** - Pattern A (STRICT) - Trading symbols (1-5 letters)
+10. **FIGI Codes** - Pattern A - Bloomberg IDs (BBG + 9 chars)
+11. **LEI Codes** - Pattern A - Legal entity IDs (20 chars)
+
+### Content Validation (8 checks)
+12. **Patent Numbers** - Pattern B (GLOBAL) - Patent IDs (US1234567, etc.)
+13. **Retail Labels** - Pattern C (Category-only) - Store/franchise categories
+14. **Executive Names** - Custom - Honorific validation
+15. **First Names Separate** - Custom - Ensures first names have separate rows
+16. **Email Addresses** - Pattern B (GLOBAL) - 🆕 NEW IN v2.0
+17. **Phone Numbers** - Pattern A (STRICT) - 🆕 NEW IN v2.0
+18. **Addresses** - Pattern A (MODERATE) - 🆕 NEW IN v2.0
+19. **Company Names** - Pattern A (STRICT) - 🆕 NEW IN v2.0
+
+### Cross-Validation (5 checks)
+20. **Name Recycling** - Prevents reusing Before names in After
+21. **After in Before** - Ensures After values don't appear in Before column
+22. **Blank Before Check** - Flags blank Before with populated After
+23. **Deletion Entries** - Confirms deletion entries exist
+24. **Format Consistency** - Validates digit pattern preservation
+
+---
+
+## Pattern Types Explained
+
+**Pattern A (Context-Based)**: Requires category/comment context for detection
+**Pattern B (Global)**: Detects everywhere without context (Patents, Emails)
+**Pattern C (Category-Only)**: Only checks Category column (Retail Labels)
+**Custom**: Special logic outside framework (Executive Names, Name checks)
+
+---
+
 ## Contact & Maintenance
 
 **Repository**: https://github.com/shahkhanseekinvest/anonymization-tracker-qc-tool
@@ -397,4 +503,5 @@ A: Create a small CSV/Excel with test cases and upload via UI
 ---
 
 *Last updated: January 2026*
-*Tool version: 20 checks (18 original + 2 new)*
+*Tool version: **v2.0** - 24 checks (20 original + 4 new)*
+*Major refactor: Hierarchical Detection Framework implemented*
