@@ -1561,70 +1561,111 @@ if uploaded_file:
         col3.metric("❌ Errors", errors)
         
         st.markdown("---")
-        
-        # Display results with grouping
-        check_groups = {
-            "Links & URLs": ["SEC Links", "After URL Leakage"],
-            "Financial Identifiers": ["CIK Numbers", "EIN Numbers", "SEC File Numbers"],
-            "Security Identifiers": ["CUSIP Codes", "ISIN Codes", "SEDOL Codes", "Stock Tickers", "FIGI Codes", "LEI Codes"],
-            "Content Validation": ["Patent Numbers", "Retail Labels", "Executive Names", "First Names Separate"],
-            "Cross-Validation": ["Name Recycling", "After in Before", "Blank Before Check", "Deletion Entries", "Format Consistency"]
+
+        # Map check names to categories for display tags
+        check_categories = {
+            "SEC Links": "Links & URLs",
+            "After URL Leakage": "Links & URLs",
+            "CIK Numbers": "Financial Identifiers",
+            "EIN Numbers": "Financial Identifiers",
+            "SEC File Numbers": "Financial Identifiers",
+            "CUSIP Codes": "Security Identifiers",
+            "ISIN Codes": "Security Identifiers",
+            "SEDOL Codes": "Security Identifiers",
+            "Stock Tickers": "Security Identifiers",
+            "FIGI Codes": "Security Identifiers",
+            "LEI Codes": "Security Identifiers",
+            "Patent Numbers": "Content Validation",
+            "Retail Labels": "Content Validation",
+            "Executive Names": "Content Validation",
+            "First Names Separate": "Content Validation",
+            "Name Recycling": "Cross-Validation",
+            "After in Before": "Cross-Validation",
+            "Blank Before Check": "Cross-Validation",
+            "Deletion Entries": "Cross-Validation",
+            "Format Consistency": "Cross-Validation"
         }
-        
-        for group_name, check_names in check_groups.items():
-            # Check if any checks in this group have results
-            group_results = [r for r in results if r['check_name'] in check_names]
-            if not group_results:
-                continue
-                
-            st.subheader(group_name)
-            
-            for result in group_results:
-                # Determine icon and styling
+
+        # Group results by severity (maintaining original check order)
+        error_results = [r for r in results if r['severity'] == 'error']
+        warning_results = [r for r in results if r['severity'] == 'warning']
+        pass_results = [r for r in results if r['severity'] == 'pass']
+
+        # Helper function to display a single check result
+        def display_check_result(result):
+            category_tag = check_categories.get(result['check_name'], '')
+
+            # Determine icon and styling
+            if result['severity'] == 'error':
+                icon = "❌"
+                st.error(f"**{icon} {result['check_name']}** `{category_tag}`: {result['message']}")
+            elif result['severity'] == 'warning':
+                icon = "⚠️"
+                st.warning(f"**{icon} {result['check_name']}** `{category_tag}`: {result['message']}")
+            else:
+                icon = "✅"
+                st.success(f"**{icon} {result['check_name']}** `{category_tag}`: {result['message']}")
+
+            # Show details if there are issues
+            if result['rows'] and len(result['rows']) > 0:
+                issue_count = len(result['rows'])
                 if result['severity'] == 'error':
-                    icon = "❌"
-                    st.error(f"**{icon} {result['check_name']}**: {result['message']}")
+                    expander_label = f"🔴 View {issue_count} issue(s) requiring attention"
                 elif result['severity'] == 'warning':
-                    icon = "⚠️"
-                    st.warning(f"**{icon} {result['check_name']}**: {result['message']}")
+                    expander_label = f"⚠️ View {issue_count} item(s) to review"
                 else:
-                    icon = "✅"
-                    st.success(f"**{icon} {result['check_name']}**: {result['message']}")
-                
-                # Show details if there are issues
-                if result['rows'] and len(result['rows']) > 0:
-                    issue_count = len(result['rows'])
+                    expander_label = f"✓ View {issue_count} item(s) validated"
+
+                with st.expander(expander_label):
                     if result['severity'] == 'error':
-                        expander_label = f"🔴 View {issue_count} issue(s) requiring attention"
-                    elif result['severity'] == 'warning':
-                        expander_label = f"⚠️ View {issue_count} item(s) to review"
+                        st.caption("⚠️ **Action Required**: Fix these issues in your tracker and re-upload")
+
+                    if isinstance(result['rows'][0], dict):
+                        # Create a cleaner DataFrame for display
+                        display_df = pd.DataFrame(result['rows'])
+
+                        # Rename excel_row to something clearer
+                        if 'excel_row' in display_df.columns:
+                            display_df = display_df.rename(columns={'excel_row': '📍 Excel Row'})
+                            # Move Excel Row to first column
+                            cols = ['📍 Excel Row'] + [col for col in display_df.columns if col != '📍 Excel Row']
+                            display_df = display_df[cols]
+
+                        st.dataframe(
+                            display_df,
+                            use_container_width=True,
+                            hide_index=True
+                        )
                     else:
-                        expander_label = f"✓ View {issue_count} item(s) validated"
-                    
-                    with st.expander(expander_label):
-                        if result['severity'] == 'error':
-                            st.caption("⚠️ **Action Required**: Fix these issues in your tracker and re-upload")
-                        
-                        if isinstance(result['rows'][0], dict):
-                            # Create a cleaner DataFrame for display
-                            display_df = pd.DataFrame(result['rows'])
-                            
-                            # Rename excel_row to something clearer
-                            if 'excel_row' in display_df.columns:
-                                display_df = display_df.rename(columns={'excel_row': '📍 Excel Row'})
-                                # Move Excel Row to first column
-                                cols = ['📍 Excel Row'] + [col for col in display_df.columns if col != '📍 Excel Row']
-                                display_df = display_df[cols]
-                            
-                            st.dataframe(
-                                display_df,
-                                use_container_width=True,
-                                hide_index=True
-                            )
-                        else:
-                            st.write(f"Excel Rows: {', '.join(map(str, result['rows']))}")
-            
+                        st.write(f"Excel Rows: {', '.join(map(str, result['rows']))}")
+
+        # 1. Display Critical Fixes (Errors) First
+        if error_results:
+            st.subheader(f"🔴 Critical Fixes Required ({len(error_results)})")
+            st.caption("⚠️ These issues must be fixed before document release")
+            st.markdown("")
+
+            for result in error_results:
+                display_check_result(result)
+
             st.markdown("---")
+
+        # 2. Display Warnings Second
+        if warning_results:
+            st.subheader(f"🟡 Warnings ({len(warning_results)})")
+            st.caption("ℹ️ Review recommended but not required")
+            st.markdown("")
+
+            for result in warning_results:
+                display_check_result(result)
+
+            st.markdown("---")
+
+        # 3. Display Passes Last (Collapsible, Hidden by Default)
+        if pass_results:
+            with st.expander(f"🟢 View All Passed Checks ({len(pass_results)})", expanded=False):
+                for result in pass_results:
+                    display_check_result(result)
         
     except Exception as e:
         st.error(f"❌ Error processing file: {str(e)}")
