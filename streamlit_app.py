@@ -1180,10 +1180,10 @@ def check_executive_honorifics(df: pd.DataFrame) -> Dict:
     intentionally excluded from the Detect → Context → Enforce framework.
     """
     issues = []
-    
+
     # Get all executive rows
     exec_df = df[df['Category'].str.upper() == 'EXECUTIVES']
-    
+
     # Extract full names (assuming format: "FirstName LastName")
     full_names = []
     for idx, row in exec_df.iterrows():
@@ -1197,17 +1197,17 @@ def check_executive_honorifics(df: pd.DataFrame) -> Dict:
                 'last_name': words[-1],
                 'after': row['After']
             })
-    
+
     # For each full name, check if honorific variant exists
     for name_info in full_names:
         last_name = name_info['last_name']
         # Check if any Before value has honorific + this last name
         has_honorific = exec_df['Before'].astype(str).str.contains(
-            f'(Mr|Mrs|Ms|Dr)\.?\s+{last_name}', 
-            case=False, 
+            f'(Mr|Mrs|Ms|Dr)\.?\s+{last_name}',
+            case=False,
             na=False
         ).any()
-        
+
         if not has_honorific:
             issues.append({
                 'excel_row': name_info['excel_row'],
@@ -1215,11 +1215,92 @@ def check_executive_honorifics(df: pd.DataFrame) -> Dict:
                 'after': name_info['after'],
                 'missing': f'Need: Mr./Mrs./Ms. {last_name} variant'
             })
-    
+
     return {
         'passed': len(issues) == 0,
-        'message': f'All executive names have proper title variants' if len(issues) == 0 else f'⚠️ Found {len(issues)} executive(s) missing honorific entries (Mr./Mrs./Ms. LastName)',
-        'severity': 'pass' if len(issues) == 0 else 'warning',
+        'message': f'All executive names have proper title variants' if len(issues) == 0 else f'❌ Found {len(issues)} executive(s) missing honorific entries (Mr./Mrs./Ms. LastName)',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': issues
+    }
+
+def check_first_names_separate_rows(df: pd.DataFrame) -> Dict:
+    """
+    Check if first names from full names have separate tracker rows.
+
+    For EXECUTIVES category only: ensures that if "John Smith" appears,
+    "John" should also have its own row for complete anonymization coverage.
+    """
+    issues = []
+
+    # Get all executive rows
+    exec_df = df[df['Category'].str.upper() == 'EXECUTIVES']
+
+    if len(exec_df) == 0:
+        return {
+            'passed': False,
+            'message': 'No EXECUTIVES category found to check',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    # Build set of all first names that appear standalone in Before column
+    standalone_first_names = set()
+    for before_val in exec_df['Before'].dropna():
+        before_str = str(before_val).strip()
+        words = before_str.split()
+
+        # Clean words - remove honorifics and middle initials
+        clean_words = []
+        for w in words:
+            w_clean = w.strip('.,()').upper()
+            # Skip honorifics
+            if w_clean in ['MR', 'MRS', 'MS', 'DR', 'MR.', 'MRS.', 'MS.', 'DR.']:
+                continue
+            # Skip middle initials (single letter with optional period)
+            if len(w_clean.rstrip('.')) == 1:
+                continue
+            clean_words.append(w_clean)
+
+        # If only one word remains, it's a standalone first name
+        if len(clean_words) == 1:
+            standalone_first_names.add(clean_words[0])
+
+    # Extract full names and check if their first names have standalone rows
+    for idx, row in exec_df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        words = before_val.split()
+
+        # Clean words - remove honorifics and middle initials
+        clean_words = []
+        for w in words:
+            w_clean = w.strip('.,()').upper()
+            # Skip honorifics
+            if w_clean in ['MR', 'MRS', 'MS', 'DR', 'MR.', 'MRS.', 'MS.', 'DR.']:
+                continue
+            # Skip middle initials
+            if len(w_clean.rstrip('.')) == 1:
+                continue
+            clean_words.append(w_clean)
+
+        # If this is a full name (2+ words after cleaning)
+        if len(clean_words) >= 2:
+            first_name = clean_words[0]
+
+            # Check if this first name has a standalone row
+            if first_name not in standalone_first_names:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': 'EXECUTIVES',
+                    'full_name': before_val,
+                    'missing_first_name': first_name.title(),
+                    'after': row['After'],
+                    'problem': f'First name "{first_name.title()}" should have separate tracker row'
+                })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All executive first names have separate rows' if len(issues) == 0 else f'❌ Found {len(issues)} full name(s) missing first-name-only entries',
+        'severity': 'pass' if len(issues) == 0 else 'error',
         'rows': issues
     }
 
@@ -1267,10 +1348,10 @@ def check_name_recycling(df: pd.DataFrame) -> Dict:
 def check_after_in_before(df: pd.DataFrame) -> Dict:
     """Check if any After values appear in Before column"""
     issues = []
-    
+
     # Get all Before and After values
     before_set = set(df['Before'].dropna().astype(str))
-    
+
     for idx, row in df.iterrows():
         after_val = str(row['After']) if pd.notna(row['After']) else ''
         if after_val and after_val in before_set:
@@ -1281,10 +1362,36 @@ def check_after_in_before(df: pd.DataFrame) -> Dict:
                 'after': row['After'],
                 'problem': f'After value "{after_val}" also appears in Before column'
             })
-    
+
     return {
         'passed': len(issues) == 0,
         'message': f'No cross-contamination detected (After values unique)' if len(issues) == 0 else f'❌ Found {len(issues)} After value(s) that also appear in Before (not anonymizing)',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': issues
+    }
+
+def check_blank_before_populated_after(df: pd.DataFrame) -> Dict:
+    """Check if Before column is blank but After column has a value"""
+    issues = []
+
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+
+        # Check if Before is blank/empty but After has a value
+        # Handle 'nan' string representation from pandas
+        if before_val.lower() in ['', 'nan'] and after_val and after_val.lower() != 'nan':
+            issues.append({
+                'excel_row': idx + 2,
+                'category': row['Category'],
+                'before': '[BLANK]',
+                'after': row['After'],
+                'problem': 'Cannot anonymize blank/missing Before value'
+            })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All rows have valid Before values' if len(issues) == 0 else f'❌ Found {len(issues)} row(s) with blank Before but populated After',
         'severity': 'pass' if len(issues) == 0 else 'error',
         'rows': issues
     }
@@ -1367,17 +1474,17 @@ def check_numeric_consistency(df: pd.DataFrame) -> Dict:
 
 def run_all_checks(df: pd.DataFrame) -> List[Dict]:
     """Run all QC checks and return results"""
-    
+
     checks = [
         # Links & URLs
         ("SEC Links", check_sec_links),
         ("After URL Leakage", check_after_link_leakage),
-        
+
         # Financial Identifiers
         ("CIK Numbers", check_cik_ids),
         ("EIN Numbers", check_ein_ids),
         ("SEC File Numbers", check_sec_file_numbers),
-        
+
         # Security Identifiers
         ("CUSIP Codes", check_cusip_ids),
         ("ISIN Codes", check_isin_ids),
@@ -1385,15 +1492,17 @@ def run_all_checks(df: pd.DataFrame) -> List[Dict]:
         ("Stock Tickers", check_ticker_symbols),
         ("FIGI Codes", check_figi_ids),
         ("LEI Codes", check_lei_ids),
-        
+
         # Content Validation
         ("Patent Numbers", check_patent_ids),
         ("Retail Labels", check_retail_labels),
         ("Executive Names", check_executive_honorifics),
-        
+        ("First Names Separate", check_first_names_separate_rows),
+
         # Cross-Validation
         ("Name Recycling", check_name_recycling),
         ("After in Before", check_after_in_before),
+        ("Blank Before Check", check_blank_before_populated_after),
         ("Deletion Entries", check_deletion_entries),
         ("Format Consistency", check_numeric_consistency)
     ]
@@ -1452,70 +1561,131 @@ if uploaded_file:
         col3.metric("❌ Errors", errors)
         
         st.markdown("---")
-        
-        # Display results with grouping
-        check_groups = {
-            "Links & URLs": ["SEC Links", "After URL Leakage"],
-            "Financial Identifiers": ["CIK Numbers", "EIN Numbers", "SEC File Numbers"],
-            "Security Identifiers": ["CUSIP Codes", "ISIN Codes", "SEDOL Codes", "Stock Tickers", "FIGI Codes", "LEI Codes"],
-            "Content Validation": ["Patent Numbers", "Retail Labels", "Executive Names"],
-            "Cross-Validation": ["Name Recycling", "After in Before", "Deletion Entries", "Format Consistency"]
+
+        # Map check names to categories for display tags
+        check_categories = {
+            "SEC Links": "Links & URLs",
+            "After URL Leakage": "Links & URLs",
+            "CIK Numbers": "Financial Identifiers",
+            "EIN Numbers": "Financial Identifiers",
+            "SEC File Numbers": "Financial Identifiers",
+            "CUSIP Codes": "Security Identifiers",
+            "ISIN Codes": "Security Identifiers",
+            "SEDOL Codes": "Security Identifiers",
+            "Stock Tickers": "Security Identifiers",
+            "FIGI Codes": "Security Identifiers",
+            "LEI Codes": "Security Identifiers",
+            "Patent Numbers": "Content Validation",
+            "Retail Labels": "Content Validation",
+            "Executive Names": "Content Validation",
+            "First Names Separate": "Content Validation",
+            "Name Recycling": "Cross-Validation",
+            "After in Before": "Cross-Validation",
+            "Blank Before Check": "Cross-Validation",
+            "Deletion Entries": "Cross-Validation",
+            "Format Consistency": "Cross-Validation"
         }
-        
-        for group_name, check_names in check_groups.items():
-            # Check if any checks in this group have results
-            group_results = [r for r in results if r['check_name'] in check_names]
-            if not group_results:
-                continue
-                
-            st.subheader(group_name)
-            
-            for result in group_results:
-                # Determine icon and styling
-                if result['severity'] == 'error':
-                    icon = "❌"
-                    st.error(f"**{icon} {result['check_name']}**: {result['message']}")
-                elif result['severity'] == 'warning':
-                    icon = "⚠️"
-                    st.warning(f"**{icon} {result['check_name']}**: {result['message']}")
-                else:
-                    icon = "✅"
-                    st.success(f"**{icon} {result['check_name']}**: {result['message']}")
-                
-                # Show details if there are issues
-                if result['rows'] and len(result['rows']) > 0:
-                    issue_count = len(result['rows'])
+
+        # Group results by severity (maintaining original check order)
+        error_results = [r for r in results if r['severity'] == 'error']
+        warning_results = [r for r in results if r['severity'] == 'warning']
+        pass_results = [r for r in results if r['severity'] == 'pass']
+
+        # Helper function to display a single check result
+        def display_check_result(result, use_expander=True):
+            category_tag = check_categories.get(result['check_name'], '')
+
+            # Determine icon and styling
+            if result['severity'] == 'error':
+                icon = "❌"
+                st.error(f"**{icon} {result['check_name']}** `{category_tag}`: {result['message']}")
+            elif result['severity'] == 'warning':
+                icon = "⚠️"
+                st.warning(f"**{icon} {result['check_name']}** `{category_tag}`: {result['message']}")
+            else:
+                icon = "✅"
+                st.success(f"**{icon} {result['check_name']}** `{category_tag}`: {result['message']}")
+
+            # Show details if there are issues
+            if result['rows'] and len(result['rows']) > 0:
+                issue_count = len(result['rows'])
+
+                # Prepare row details display
+                def show_row_details():
+                    if result['severity'] == 'error':
+                        st.caption("⚠️ **Action Required**: Fix these issues in your tracker and re-upload")
+
+                    if isinstance(result['rows'][0], dict):
+                        # Create a cleaner DataFrame for display
+                        display_df = pd.DataFrame(result['rows'])
+
+                        # Rename excel_row to something clearer
+                        if 'excel_row' in display_df.columns:
+                            display_df = display_df.rename(columns={'excel_row': '📍 Excel Row'})
+                            # Move Excel Row to first column
+                            cols = ['📍 Excel Row'] + [col for col in display_df.columns if col != '📍 Excel Row']
+                            display_df = display_df[cols]
+
+                        # Check-specific column reordering
+                        if result['check_name'] == 'First Names Separate':
+                            # Desired order: Excel Row, category, full_name, after, missing_first_name, problem
+                            desired_order = ['📍 Excel Row', 'category', 'full_name', 'after', 'missing_first_name', 'problem']
+                            # Only reorder columns that exist
+                            cols = [c for c in desired_order if c in display_df.columns]
+                            # Add any remaining columns not in desired_order
+                            cols += [c for c in display_df.columns if c not in cols]
+                            display_df = display_df[cols]
+
+                        st.dataframe(
+                            display_df,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        st.write(f"Excel Rows: {', '.join(map(str, result['rows']))}")
+
+                # Use expander only if allowed (avoid nested expanders)
+                if use_expander:
                     if result['severity'] == 'error':
                         expander_label = f"🔴 View {issue_count} issue(s) requiring attention"
                     elif result['severity'] == 'warning':
                         expander_label = f"⚠️ View {issue_count} item(s) to review"
                     else:
                         expander_label = f"✓ View {issue_count} item(s) validated"
-                    
+
                     with st.expander(expander_label):
-                        if result['severity'] == 'error':
-                            st.caption("⚠️ **Action Required**: Fix these issues in your tracker and re-upload")
-                        
-                        if isinstance(result['rows'][0], dict):
-                            # Create a cleaner DataFrame for display
-                            display_df = pd.DataFrame(result['rows'])
-                            
-                            # Rename excel_row to something clearer
-                            if 'excel_row' in display_df.columns:
-                                display_df = display_df.rename(columns={'excel_row': '📍 Excel Row'})
-                                # Move Excel Row to first column
-                                cols = ['📍 Excel Row'] + [col for col in display_df.columns if col != '📍 Excel Row']
-                                display_df = display_df[cols]
-                            
-                            st.dataframe(
-                                display_df,
-                                use_container_width=True,
-                                hide_index=True
-                            )
-                        else:
-                            st.write(f"Excel Rows: {', '.join(map(str, result['rows']))}")
-            
+                        show_row_details()
+                else:
+                    # Display directly without expander
+                    show_row_details()
+
+        # 1. Display Critical Fixes (Errors) First
+        if error_results:
+            st.subheader(f"🔴 Critical Fixes Required ({len(error_results)})")
+            st.caption("⚠️ These issues must be fixed before document release")
+            st.markdown("")
+
+            for result in error_results:
+                display_check_result(result)
+
             st.markdown("---")
+
+        # 2. Display Warnings Second
+        if warning_results:
+            st.subheader(f"🟡 Warnings ({len(warning_results)})")
+            st.caption("ℹ️ Review recommended but not required")
+            st.markdown("")
+
+            for result in warning_results:
+                display_check_result(result)
+
+            st.markdown("---")
+
+        # 3. Display Passes Last (Collapsible, Hidden by Default)
+        if pass_results:
+            with st.expander(f"🟢 View All Passed Checks ({len(pass_results)})", expanded=False):
+                for result in pass_results:
+                    display_check_result(result, use_expander=False)
         
     except Exception as e:
         st.error(f"❌ Error processing file: {str(e)}")
@@ -1548,12 +1718,12 @@ else:
     ### 🔗 Links & URLs (2 checks)
     1. **SEC Links** - Verifies SEC.gov URLs exist and are properly anonymized
     2. **After URL Leakage** - Ensures After URLs don't contain Before identifiers
-    
+
     ### 🔑 Financial Identifiers (3 checks)
     3. **CIK Numbers** - SEC company identifiers (e.g., 0001018724)
     4. **EIN Numbers** - Tax identification numbers (e.g., 12-3456789)
     5. **SEC File Numbers** - SEC filing numbers (e.g., 001-12345)
-    
+
     ### 📈 Security Identifiers (6 checks)
     6. **CUSIP Codes** - US/Canada securities (e.g., 037833100)
     7. **ISIN Codes** - International securities (e.g., US0378331005)
@@ -1561,17 +1731,19 @@ else:
     9. **Stock Tickers** - Trading symbols (e.g., AAPL, MSFT)
     10. **FIGI Codes** - Bloomberg identifiers (e.g., BBG000BLNQ16)
     11. **LEI Codes** - Legal entity identifiers (20 characters)
-    
-    ### 📝 Content Validation (3 checks)
+
+    ### 📝 Content Validation (4 checks)
     12. **Patent Numbers** - Patent identifiers (e.g., US1234567)
     13. **Retail Labels** - Store/franchise/retail categories
     14. **Executive Names** - Executive titles and honorifics (Mr./Mrs.)
-    
-    ### 🔄 Cross-Validation (4 checks)
-    15. **Name Recycling** - Prevents reusing Before names in After column
-    16. **After in Before** - Ensures After values don't appear in Before column
-    17. **Deletion Entries** - Confirms some terms are marked for deletion (blank After)
-    18. **Format Consistency** - Validates digit patterns are preserved in anonymized IDs
+    15. **First Names Separate** - Ensures first names from full names have separate rows (EXECUTIVES)
+
+    ### 🔄 Cross-Validation (5 checks)
+    16. **Name Recycling** - Prevents reusing Before names in After column
+    17. **After in Before** - Ensures After values don't appear in Before column
+    18. **Blank Before Check** - Flags rows with blank Before but populated After values
+    19. **Deletion Entries** - Confirms some terms are marked for deletion (blank After)
+    20. **Format Consistency** - Validates digit patterns are preserved in anonymized IDs
     """
     
     st.markdown(checks_info)
