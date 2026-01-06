@@ -7,7 +7,7 @@ from email_validator import validate_email, EmailNotValidError
 import phonenumbers
 
 # -------------------------
-# Load spaCy model once at startup (cached for performance)
+# Load spaCy model once (cached for performance, lazy-loaded)
 # -------------------------
 @st.cache_resource
 def load_spacy_model():
@@ -17,9 +17,6 @@ def load_spacy_model():
     except OSError:
         # Return None if model not found - we'll show error message later
         return None
-
-# Load model at startup
-nlp = load_spacy_model()
 
 # -------------------------
 # Shared context gates
@@ -1265,6 +1262,9 @@ def check_phone_numbers(df: pd.DataFrame) -> Dict:
 
 def check_addresses(df: pd.DataFrame) -> Dict:
     """Detection check for addresses using spaCy GPE/LOC entities"""
+    # Lazy-load spaCy model
+    nlp = load_spacy_model()
+
     if nlp is None:
         return {
             'passed': False,
@@ -1315,6 +1315,9 @@ def check_addresses(df: pd.DataFrame) -> Dict:
 
 def check_company_names(df: pd.DataFrame) -> Dict:
     """Detection check for company/organization names using spaCy NER"""
+    # Lazy-load spaCy model
+    nlp = load_spacy_model()
+
     if nlp is None:
         return {
             'passed': False,
