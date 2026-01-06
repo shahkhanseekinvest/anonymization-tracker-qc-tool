@@ -1218,8 +1218,8 @@ def check_executive_honorifics(df: pd.DataFrame) -> Dict:
 
     return {
         'passed': len(issues) == 0,
-        'message': f'All executive names have proper title variants' if len(issues) == 0 else f'⚠️ Found {len(issues)} executive(s) missing honorific entries (Mr./Mrs./Ms. LastName)',
-        'severity': 'pass' if len(issues) == 0 else 'warning',
+        'message': f'All executive names have proper title variants' if len(issues) == 0 else f'❌ Found {len(issues)} executive(s) missing honorific entries (Mr./Mrs./Ms. LastName)',
+        'severity': 'pass' if len(issues) == 0 else 'error',
         'rows': issues
     }
 
@@ -1624,6 +1624,16 @@ if uploaded_file:
                             display_df = display_df.rename(columns={'excel_row': '📍 Excel Row'})
                             # Move Excel Row to first column
                             cols = ['📍 Excel Row'] + [col for col in display_df.columns if col != '📍 Excel Row']
+                            display_df = display_df[cols]
+
+                        # Check-specific column reordering
+                        if result['check_name'] == 'First Names Separate':
+                            # Desired order: Excel Row, category, full_name, after, missing_first_name, problem
+                            desired_order = ['📍 Excel Row', 'category', 'full_name', 'after', 'missing_first_name', 'problem']
+                            # Only reorder columns that exist
+                            cols = [c for c in desired_order if c in display_df.columns]
+                            # Add any remaining columns not in desired_order
+                            cols += [c for c in display_df.columns if c not in cols]
                             display_df = display_df[cols]
 
                         st.dataframe(
