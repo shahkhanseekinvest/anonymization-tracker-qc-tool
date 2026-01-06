@@ -1592,7 +1592,7 @@ if uploaded_file:
         pass_results = [r for r in results if r['severity'] == 'pass']
 
         # Helper function to display a single check result
-        def display_check_result(result):
+        def display_check_result(result, use_expander=True):
             category_tag = check_categories.get(result['check_name'], '')
 
             # Determine icon and styling
@@ -1609,14 +1609,9 @@ if uploaded_file:
             # Show details if there are issues
             if result['rows'] and len(result['rows']) > 0:
                 issue_count = len(result['rows'])
-                if result['severity'] == 'error':
-                    expander_label = f"🔴 View {issue_count} issue(s) requiring attention"
-                elif result['severity'] == 'warning':
-                    expander_label = f"⚠️ View {issue_count} item(s) to review"
-                else:
-                    expander_label = f"✓ View {issue_count} item(s) validated"
 
-                with st.expander(expander_label):
+                # Prepare row details display
+                def show_row_details():
                     if result['severity'] == 'error':
                         st.caption("⚠️ **Action Required**: Fix these issues in your tracker and re-upload")
 
@@ -1638,6 +1633,21 @@ if uploaded_file:
                         )
                     else:
                         st.write(f"Excel Rows: {', '.join(map(str, result['rows']))}")
+
+                # Use expander only if allowed (avoid nested expanders)
+                if use_expander:
+                    if result['severity'] == 'error':
+                        expander_label = f"🔴 View {issue_count} issue(s) requiring attention"
+                    elif result['severity'] == 'warning':
+                        expander_label = f"⚠️ View {issue_count} item(s) to review"
+                    else:
+                        expander_label = f"✓ View {issue_count} item(s) validated"
+
+                    with st.expander(expander_label):
+                        show_row_details()
+                else:
+                    # Display directly without expander
+                    show_row_details()
 
         # 1. Display Critical Fixes (Errors) First
         if error_results:
@@ -1665,7 +1675,7 @@ if uploaded_file:
         if pass_results:
             with st.expander(f"🟢 View All Passed Checks ({len(pass_results)})", expanded=False):
                 for result in pass_results:
-                    display_check_result(result)
+                    display_check_result(result, use_expander=False)
         
     except Exception as e:
         st.error(f"❌ Error processing file: {str(e)}")
