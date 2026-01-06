@@ -258,6 +258,120 @@ def detect_ticker(val: str) -> Optional[str]:
     cleaned = val.strip().upper()
     return cleaned if re.match(r'^[A-Z]{1,5}$', cleaned) else None
 
+
+# -------------------------
+# Blocking logic for Wave 1 checks (permissive with exceptions)
+# -------------------------
+def should_block_company_name_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT a company name.
+    Block if it's clearly about people, emails, phones, addresses, or security IDs.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # People/Individuals
+        "EXECUTIVE", "PERSON", "INDIVIDUAL", "NAME", "DIRECTOR", "OFFICER",
+        # Contact info
+        "EMAIL", "PHONE", "TELEPHONE", "FAX",
+        # Addresses
+        "ADDRESS", "STREET", "LOCATION",
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER"
+    ]
+
+    return any(term in context for term in block_terms)
+
+
+def should_block_address_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT an address.
+    Block if it's clearly about people, companies, emails, phones, or security IDs.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # People/Individuals
+        "EXECUTIVE", "PERSON", "INDIVIDUAL", "DIRECTOR", "OFFICER",
+        # Companies (full entity names, not addresses)
+        "COMPANY NAME", "ORGANIZATION NAME", "ENTITY NAME",
+        # Contact info
+        "EMAIL", "PHONE", "TELEPHONE", "FAX", "WEBSITE",
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER"
+    ]
+
+    return any(term in context for term in block_terms)
+
+
+def should_block_email_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT an email.
+    Block if it's clearly about security IDs, company names, or addresses.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER", "SEC FILE",
+        # Addresses (physical locations, not email addresses)
+        "STREET", "PHYSICAL ADDRESS", "MAILING ADDRESS", "OFFICE LOCATION",
+        # Company names (entity names, not email domains)
+        "COMPANY NAME", "ORGANIZATION NAME", "ENTITY NAME"
+    ]
+
+    return any(term in context for term in block_terms)
+
+
+def should_block_phone_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT a phone number.
+    Block if it's clearly about security IDs, company names, or emails.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER", "SEC FILE",
+        # Email
+        "EMAIL", "E-MAIL",
+        # Addresses (physical locations)
+        "STREET ADDRESS", "PHYSICAL ADDRESS", "MAILING ADDRESS",
+        # Company names
+        "COMPANY NAME", "ORGANIZATION NAME", "ENTITY NAME"
+    ]
+
+    return any(term in context for term in block_terms)
+
+
 st.set_page_config(
     page_title="Anonymization Tracker QC Tool",
     page_icon="𝕏",
@@ -1193,6 +1307,12 @@ def check_email_addresses(df: pd.DataFrame) -> Dict:
 
     for idx, row in df.iterrows():
         before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT an email
+        if should_block_email_detection(category, comment):
+            continue
 
         if before_val and before_val.lower() != 'nan':
             # Try to validate as email
@@ -1229,6 +1349,12 @@ def check_phone_numbers(df: pd.DataFrame) -> Dict:
 
     for idx, row in df.iterrows():
         before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT a phone number
+        if should_block_phone_detection(category, comment):
+            continue
 
         if before_val and before_val.lower() != 'nan':
             # Try to find phone numbers (default to US region)
@@ -1277,6 +1403,12 @@ def check_addresses(df: pd.DataFrame) -> Dict:
 
     for idx, row in df.iterrows():
         before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT an address
+        if should_block_address_detection(category, comment):
+            continue
 
         if before_val and before_val.lower() != 'nan' and len(before_val) > 10:
             # Use spaCy to detect location entities (cities, states, countries)
@@ -1330,6 +1462,12 @@ def check_company_names(df: pd.DataFrame) -> Dict:
 
     for idx, row in df.iterrows():
         before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT a company name
+        if should_block_company_name_detection(category, comment):
+            continue
 
         if before_val and before_val.lower() != 'nan':
             # Use spaCy NER to detect organizations
