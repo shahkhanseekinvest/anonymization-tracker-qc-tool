@@ -1,0 +1,1577 @@
+import streamlit as st
+import pandas as pd
+import re
+from typing import List, Dict, Tuple, Optional
+# -------------------------
+# Shared context gates
+# -------------------------
+def security_id_context_applies(category: str, comment: str = "") -> bool:
+    """
+    Context gate for first-class security / regulatory identifiers.
+    Identifiers are enforced only when they appear in company /
+    financial / issuer context.
+    """
+    context = f"{category} {comment}".upper()
+    return any(
+        token in context
+        for token in [
+            "COMPANY",
+            "COMPANY INFO",
+            "SEC",
+            "SECURITY",
+            "FINANCIAL",
+            "ENTITY",
+            "ISSUER"
+        ]
+    )
+
+# -------------------------
+# Ticker context gate (ticker-specific, less strict)
+# -------------------------
+def ticker_context_applies(category: str, comment: str = "") -> bool:
+    """
+    Context gate for stock ticker symbols.
+
+    Tickers are short, human-readable, and highly ambiguous.
+    They are enforced only when there is explicit market / security intent.
+    """
+    context = f"{category} {comment}".upper()
+    return any(
+        token in context
+        for token in [
+            "COMPANY",
+            "SECURITY",
+            "EQUITY",
+            "STOCK",
+            "TRADING",
+            "ISSUER"
+        ]
+    )
+
+
+#
+# -------------------------
+# EIN detection helpers
+# -------------------------
+EIN_REGEX_FORMATTED = re.compile(r"^\d{2}-\d{7}$")
+EIN_REGEX_UNFORMATTED = re.compile(r"^\d{9}$")
+
+def looks_like_ein(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    return bool(
+        EIN_REGEX_FORMATTED.match(value) or
+        EIN_REGEX_UNFORMATTED.match(value)
+    )
+
+def ein_context_applies(category: str, comment: str = "") -> bool:
+    """
+    Context gate for EIN with positive confirmation and cross-check blocking.
+    
+    Rules:
+    1. POSITIVE CONFIRMATION: Comment explicitly mentions "EIN" → FORCE ALLOW
+    2. EXPLICIT BLOCK: Comment mentions different identifier → FORCE BLOCK
+    3. CATEGORY + KEYWORD: Standard allow (COMPANY/ENTITY/TAX context)
+    """
+    # Handle NaN
+    if pd.isna(comment):
+        comment = ""
+    comment = str(comment).strip()
+    
+    comment_u = comment.upper()
+    category_u = category.upper()
+    
+    # RULE 1: Positive confirmation - comment explicitly says EIN
+    if any(term in comment_u for term in ["EIN", "TAX ID", "EMPLOYER IDENTIFICATION"]):
+        return True
+    
+    # RULE 2: Block if comment mentions different identifier
+    other_identifiers = ["CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "TICKER", "SEC FILE"]
+    if any(other_id in comment_u for other_id in other_identifiers):
+        return False
+    
+    # RULE 3: Standard category-based check
+    context = f"{category_u} {comment_u}"
+    return any(
+        token in context
+        for token in ["COMPANY", "ENTITY", "TAX", "LEGAL", "IRS"]
+    )
+
+def validate_ein_anonymization(before: str, after: str) -> list[str]:
+    issues = []
+
+    if before == after:
+        issues.append("EIN not anonymized (Before == After)")
+        return issues
+
+    before_formatted = bool(EIN_REGEX_FORMATTED.match(before))
+    after_formatted = bool(EIN_REGEX_FORMATTED.match(after))
+
+    if before_formatted != after_formatted:
+        issues.append("EIN format not preserved (hyphen mismatch)")
+
+    if not looks_like_ein(after):
+        issues.append("Anonymized EIN has invalid format")
+
+    if " " in after:
+        issues.append("Anonymized EIN contains spaces")
+
+    return issues
+
+# -------------------------
+# SEC file number helpers
+# -------------------------
+SEC_FILE_REGEX = re.compile(r"^\d{3}-\d{5}$")
+
+def looks_like_sec_file_number(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    return bool(SEC_FILE_REGEX.match(value))
+
+def sec_file_context_applies(category: str, comment: str = "") -> bool:
+    """
+    Context gate for SEC File Numbers with positive confirmation and cross-check blocking.
+    
+    Rules:
+    1. POSITIVE CONFIRMATION: Comment explicitly mentions "SEC FILE" or "FILE NUMBER" → FORCE ALLOW
+    2. EXPLICIT BLOCK: Comment mentions different identifier → FORCE BLOCK
+    3. CATEGORY + KEYWORD: Standard allow (SEC/FILING context)
+    """
+    # Handle NaN
+    if pd.isna(comment):
+        comment = ""
+    comment = str(comment).strip()
+    
+    comment_u = comment.upper()
+    category_u = category.upper()
+    
+    # RULE 1: Positive confirmation - comment explicitly mentions SEC file number
+    if any(term in comment_u for term in ["SEC FILE", "FILE NUMBER", "FILE NO", "FILING NUMBER"]):
+        return True
+    
+    # RULE 2: Block if comment mentions different identifier
+    other_identifiers = ["CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "TICKER", "EIN", "TAX ID"]
+    if any(other_id in comment_u for other_id in other_identifiers):
+        return False
+    
+    # RULE 3: Standard category-based check
+    context = f"{category_u} {comment_u}"
+    return any(
+        token in context
+        for token in ["SEC", "FILING", "FORM", "COMPANY INFO"]
+    )
+
+def validate_sec_file_anonymization(before: str, after: str) -> list[str]:
+    issues = []
+
+    if before == after:
+        issues.append("SEC file number not anonymized (Before == After)")
+        return issues
+
+    if not looks_like_sec_file_number(after):
+        issues.append("Anonymized SEC file number has invalid format")
+
+    if " " in after:
+        issues.append("Anonymized SEC file number contains spaces")
+
+    return issues
+
+
+# -------------------------
+# Canonical detection helpers (tolerant)
+# -------------------------
+
+def detect_isin(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = re.sub(r'[\s\-]', '', val).upper()
+    return cleaned if re.match(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$', cleaned) else None
+
+
+def detect_cusip(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = re.sub(r'[\s\-]', '', val).upper()
+    # CUSIP: 9 characters total
+    # Standard: [0-9]{3}[0-9A-Z]{5}[0-9] (US/Canada)
+    # Regulation S: Can start with U, V, or Y for foreign issuers
+    # Pattern: [0-9A-Z]{3}[0-9A-Z]{5}[0-9]
+    return cleaned if re.match(r'^[0-9A-Z]{3}[0-9A-Z]{5}[0-9]$', cleaned) else None
+
+
+def detect_sedol(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = re.sub(r'[\s\-]', '', val).upper()
+    return cleaned if re.match(r'^[B-DF-HJ-NP-TV-Z0-9]{6}[0-9]$', cleaned) else None
+
+
+def detect_figi(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = re.sub(r'[\s\-]', '', val).upper()
+    return cleaned if re.match(r'^BBG[A-Z0-9]{9}$', cleaned) else None
+
+
+def detect_lei(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = re.sub(r'[\s\-]', '', val).upper()
+    return cleaned if re.match(r'^[A-Z0-9]{20}$', cleaned) else None
+
+
+def detect_ein(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = re.sub(r'[\s\-]', '', val)
+    return cleaned if re.match(r'^\d{9}$', cleaned) else None
+
+
+def detect_cik(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = re.sub(r'\s', '', val)
+    return cleaned if re.match(r'^\d{7,10}$', cleaned) else None
+
+
+def detect_ticker(val: str) -> Optional[str]:
+    if not val:
+        return None
+    cleaned = val.strip().upper()
+    return cleaned if re.match(r'^[A-Z]{1,5}$', cleaned) else None
+
+st.set_page_config(
+    page_title="Anonymization Tracker QC Tool",
+    page_icon="𝕏",
+    layout="wide"
+)
+
+# Title and description
+st.title("Anonymization Tracker QC Tool")
+st.markdown("**Validate anonymization trackers to detect data leakage and format issues**")
+st.caption("Upload your tracker (Excel or CSV) to check Before/After columns for proper anonymization")
+
+# File uploader
+uploaded_file = st.file_uploader(
+    "Upload Tracker File (Excel or CSV)", 
+    type=['csv', 'xlsx', 'xls']
+)
+
+# File upload handling and DataFrame loading
+if uploaded_file:
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    # Normalize critical text columns to string to avoid pandas / Arrow issues
+    for col in ["Before", "After", "Category", "File", "Comment"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+
+def check_sec_links(df: pd.DataFrame) -> Dict:
+    """Two-stage check: (1) Warn if no SEC links exist, (2) Flag After value problems if they do exist"""
+    before_col = df['Before'].astype(str).str.lower()
+    has_sec = before_col.str.contains('sec.gov', na=False).any()
+    
+    # Stage 1: Check if any SEC links exist and collect them
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).lower() if pd.notna(row['Before']) else ''
+        if 'sec.gov' in before_val:
+            detected.append({
+                'excel_row': idx + 2,
+                'category': row['Category'],
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_sec:
+        return {
+            'passed': False,
+            'message': 'No SEC links detected in Before column',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values for problems
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.lower())
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).lower() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).lower() if pd.notna(row['After']) else ''
+        
+        if 'sec.gov' in before_val and after_val:
+            problem = None
+            
+            # Check if After URL contains any real identifiers from Before column
+            for before_term in before_values:
+                if len(before_term) >= 4 and before_term != before_val and before_term in after_val:
+                    problem = f"After URL contains real identifier: '{before_term}'"
+                    break
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': row['Category'],
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All SEC links properly anonymized ({len(detected)} found)' if len(issues) == 0 else f'Found {len(issues)} SEC link(s) with leakage in After column',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def check_after_link_leakage(df: pd.DataFrame) -> Dict:
+    """Check if After column URLs contain any Before column identifiers"""
+    issues = []
+    validated_urls = []
+    
+    # Get all Before values (excluding NaN)
+    before_terms = set(df['Before'].dropna().astype(str).str.lower())
+    
+    # Check After column for URLs
+    for idx, row in df.iterrows():
+        after_val = str(row['After']).lower() if pd.notna(row['After']) else ''
+        
+        # Check if it's a URL
+        if 'http' in after_val or 'www.' in after_val:
+            has_issue = False
+            # Check if any Before term appears in this After URL
+            for term in before_terms:
+                # Skip very short terms (< 4 chars) to avoid false positives
+                if len(term) >= 4 and term in after_val:
+                    issues.append({
+                        'excel_row': idx + 2,
+                        'category': row['Category'],
+                        'before_term_found': term,
+                        'before': row['Before'],
+                        'after': row['After']
+                    })
+                    has_issue = True
+                    break
+            
+            if not has_issue:
+                validated_urls.append({
+                    'excel_row': idx + 2,
+                    'category': row['Category'],
+                    'before': row['Before'],
+                    'after': row['After']
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'No identifying leakage detected in After URLs ({len(validated_urls)} URLs checked)' if len(issues) == 0 else f'Found {len(issues)} After URL(s) containing Before identifiers',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': validated_urls if len(issues) == 0 else issues
+    }
+
+def check_deletion_entries(df: pd.DataFrame) -> Dict:
+    """Check if there are rows where Before has value but After is blank"""
+    deletion_rows = df[df['Before'].notna() & df['After'].isna()]
+    has_deletions = len(deletion_rows) > 0
+    
+    # Format for display
+    deletion_details = []
+    for idx, row in deletion_rows.iterrows():
+        deletion_details.append({
+            'excel_row': idx + 2,
+            'category': row['Category'],
+            'before': row['Before'],
+            'after': '[BLANK - marked for deletion]'
+        })
+    
+    return {
+        'passed': has_deletions,
+        'message': f'Found {len(deletion_rows)} deletion entry(ies) marked for removal' if has_deletions else 'No deletion entries found',
+        'severity': 'pass' if has_deletions else 'warning',
+        'rows': deletion_details
+    }
+
+def check_patent_ids(df: pd.DataFrame) -> Dict:
+    """
+    Two-stage check for patent identifiers.
+
+    Patent IDs are detected globally (not category-gated) because they
+    frequently appear in legal, technical, and narrative text outside
+    COMPANY INFO. This is an intentional exception to the
+    Detect → Context → Enforce pattern used for first-class identifiers.
+    """
+    patent_pattern = r'\b(US|EP|WO|JP|CN|DE|GB|FR)\s?\d{6,10}\b'
+    
+    # Stage 1: Check if any patent IDs exist
+    has_patents = False
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']) if pd.notna(row['Before']) else ''
+        if re.search(patent_pattern, before_val, re.IGNORECASE):
+            has_patents = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': row['Category'],
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_patents:
+        return {
+            'passed': False,
+            'message': 'No patent numbers detected (e.g., US1234567, WO2020123456)',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values for problems
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.upper())
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']) if pd.notna(row['Before']) else ''
+        after_val = str(row['After']) if pd.notna(row['After']) else ''
+        
+        if re.search(patent_pattern, before_val, re.IGNORECASE) and after_val:
+            problem = None
+            
+            # Check 1: After contains a real patent ID from Before column
+            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+                problem = f"After value '{after_val}' is a real patent ID from Before column"
+            
+            # Check 2: Format mismatch - patent IDs should maintain structure
+            before_match = re.search(patent_pattern, before_val, re.IGNORECASE)
+            after_match = re.search(patent_pattern, after_val, re.IGNORECASE)
+            
+            if before_match and not after_match:
+                problem = f"Format mismatch: After doesn't follow patent ID format"
+            elif before_match and after_match:
+                before_digits = re.findall(r'\d+', before_match.group())
+                after_digits = re.findall(r'\d+', after_match.group())
+                if before_digits and after_digits:
+                    if len(before_digits[0]) != len(after_digits[0]):
+                        problem = f"Format mismatch: Patent number length changed from {len(before_digits[0])} to {len(after_digits[0])} digits"
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': row['Category'],
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All patent numbers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'Found {len(issues)} patent number(s) with anonymization problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+CIK_REGEX = re.compile(r"^\d{7,10}$")
+
+def looks_like_cik(value: str) -> bool:
+    return bool(value and CIK_REGEX.match(value))
+
+def check_cik_ids(df: pd.DataFrame) -> Dict:
+    """Two-stage check for CIK numbers"""
+    
+    # Stage 1: Check if any CIKs exist
+    has_cik = False
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK"):
+            has_cik = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_cik:
+        return {
+            'passed': False,
+            'message': 'No CIK numbers detected (SEC company IDs like 0001018724)',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.lower())
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK") and after_val:
+            problem = None
+            
+            if after_val.lower() in before_values and after_val.lower() != before_val.lower():
+                problem = f"After CIK '{after_val}' is a real identifier from Before column"
+            elif not after_val.isdigit():
+                problem = f"After value is not a valid CIK format (should be numeric)"
+            elif len(before_val) != len(after_val):
+                problem = f"CIK length mismatch: {len(before_val)} digits → {len(after_val)} digits"
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All CIK numbers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} CIK(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def check_isin_ids(df: pd.DataFrame) -> Dict:
+    """Two-stage check for ISIN codes - handles spaces in real-world formats"""
+    
+    # Stage 1: Check if any ISINs exist
+    has_isin = False
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "ISIN") and detect_isin(before_val):
+            has_isin = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_isin:
+        return {
+            'passed': False,
+            'message': 'No ISIN codes detected (international security IDs like US0378331005)',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values
+    issues = []
+    before_values = set(detect_isin(str(v)) for v in df['Before'].dropna() if detect_isin(str(v)))
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        
+        normalized_before = detect_isin(before_val)
+        if security_id_context_applies(category) and normalized_before and after_val:
+            problem = None
+            normalized_after = detect_isin(after_val)
+            
+            if not normalized_after:
+                problem = f"After value doesn't match ISIN format (should be 2 letters + 9 alphanumeric + 1 digit)"
+            elif normalized_after in before_values and normalized_after != normalized_before:
+                problem = f"After ISIN '{after_val}' is a real identifier from Before column"
+            elif len(normalized_before) != len(normalized_after):
+                problem = f"ISIN length mismatch: {len(normalized_before)} → {len(normalized_after)} characters"
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All ISIN codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} ISIN(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def check_cusip_ids(df: pd.DataFrame) -> Dict:
+    """Two-stage check for CUSIP codes - handles spaces in real-world formats"""
+    
+    # Stage 1: Check if any CUSIPs exist
+    has_cusip = False
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if security_id_context_applies(category) and detect_cusip(before_val) and security_id_comment_allows_detection(comment, "CUSIP"):
+            has_cusip = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_cusip:
+        return {
+            'passed': False,
+            'message': 'No CUSIP codes detected (US/Canada security IDs like 037833100)',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values
+    issues = []
+    before_values = set(detect_cusip(str(v)) for v in df['Before'].dropna() if detect_cusip(str(v)))
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        normalized_before = detect_cusip(before_val)
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CUSIP") and normalized_before and after_val:
+            problem = None
+            normalized_after = detect_cusip(after_val)
+            
+            if not normalized_after:
+                problem = f"After value doesn't match CUSIP format (should be 9 characters: 3 digits + 5 alphanumeric + 1 digit)"
+            elif normalized_after in before_values and normalized_after != normalized_before:
+                problem = f"After CUSIP '{after_val}' is a real identifier from Before column"
+            elif len(normalized_before) != len(normalized_after):
+                problem = f"CUSIP length mismatch: {len(normalized_before)} → {len(normalized_after)} characters"
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All CUSIP codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} CUSIP(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def check_sedol_ids(df: pd.DataFrame) -> Dict:
+    """Two-stage check for SEDOL codes"""
+    
+    # Stage 1: Check if any SEDOLs exist
+    has_sedol = False
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEDOL") and detect_sedol(before_val):
+            has_sedol = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_sedol:
+        return {
+            'passed': False,
+            'message': 'No SEDOL codes detected (UK security IDs like 2046251)',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.upper())
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        
+        if security_id_context_applies(category) and detect_sedol(before_val) and after_val:
+            problem = None
+            
+            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+                problem = f"After SEDOL '{after_val}' is a real identifier from Before column"
+            elif not re.match(r'^[B-DF-HJ-NP-TV-Z0-9]{6}[0-9]$', after_val):
+                problem = f"After value doesn't match SEDOL format (7 characters)"
+            elif len(before_val) != len(after_val):
+                problem = f"SEDOL length mismatch: {len(before_val)} → {len(after_val)} characters"
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All SEDOL codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} SEDOL(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+# -------------------------
+# EIN and SEC File Number QC Checks
+# -------------------------
+
+def check_ein_ids(df: pd.DataFrame) -> Dict:
+    """Two-stage check for EINs"""
+    has_ein = False
+    detected = []
+
+    for idx, row in df.iterrows():
+        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        if looks_like_ein(before) and ein_context_applies(category, comment):
+            has_ein = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+
+    if not has_ein:
+        return {
+            'passed': False,
+            'message': 'No EIN numbers detected (tax IDs like 12-3456789)',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    issues = []
+    for idx, row in df.iterrows():
+        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        if looks_like_ein(before) and ein_context_applies(category, comment) and after:
+            for issue in validate_ein_anonymization(before, after):
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': issue
+                })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All EIN numbers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'Found {len(issues)} EIN number(s) with format issues',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
+    """Two-stage check for SEC file numbers"""
+    has_sec_file = False
+    detected = []
+
+    for idx, row in df.iterrows():
+        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        if looks_like_sec_file_number(before) and sec_file_context_applies(category, comment):
+            has_sec_file = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+
+    if not has_sec_file:
+        return {
+            'passed': False,
+            'message': 'No SEC file numbers detected (filing IDs like 001-12345)',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    issues = []
+    for idx, row in df.iterrows():
+        before = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        if looks_like_sec_file_number(before) and sec_file_context_applies(category, comment) and after:
+            for issue in validate_sec_file_anonymization(before, after):
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': issue
+                })
+
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All SEC file numbers anonymized correctly ({len(detected)} found)' if len(issues) == 0 else f'Found {len(issues)} SEC file number(s) with format issues',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def ticker_comment_allows_detection(comment) -> bool:
+    """
+    Inclusion-only rule for ticker detection.
+    - Empty comment → allow
+    - Explicit ticker / market language → allow
+    - Anything else → block
+    """
+    # Handle NaN values from pandas
+    if pd.isna(comment):
+        return True
+    
+    # Convert to string and check if empty
+    comment_str = str(comment).strip()
+    if not comment_str or comment_str.lower() == 'nan':
+        return True
+
+    comment_u = comment_str.upper()
+    return any(
+        token in comment_u
+        for token in [
+            "TICKER",
+            "STOCK",
+            "EQUITY",
+            "NASDAQ",
+            "NYSE",
+            "LISTED",
+            "TRADING",
+            "SECURITY SYMBOL"
+        ]
+    )
+
+def security_id_comment_allows_detection(comment, identifier_type: str = "security") -> bool:
+    """
+    Unified comment filter for security identifiers (CIK, CUSIP, ISIN, SEDOL, FIGI, LEI).
+    
+    Prevents false positives and double counting by blocking detection when comment
+    suggests the value is something else (narrative text, names, addresses, etc.)
+    
+    Rules:
+    1. POSITIVE CONFIRMATION: If comment explicitly mentions THIS identifier type → FORCE ALLOW
+    2. EXPLICIT BLOCK: If comment explicitly mentions DIFFERENT identifier type → FORCE BLOCK
+    3. NARRATIVE BLOCK: If comment contains narrative language → BLOCK
+    4. NEUTRAL/EMPTY: Allow (category gate is sufficient)
+    
+    Args:
+        comment: The comment field value
+        identifier_type: The specific identifier being checked (e.g., "CUSIP", "CIK")
+    """
+    # Handle NaN values from pandas
+    if pd.isna(comment):
+        return True
+    
+    # Convert to string and check if empty
+    comment_str = str(comment).strip()
+    if not comment_str or comment_str.lower() == 'nan':
+        return True
+    
+    comment_u = comment_str.upper()
+    
+    # RULE 1: POSITIVE CONFIRMATION - If comment explicitly mentions THIS identifier, FORCE ALLOW
+    # This overrides everything else
+    identifier_map = {
+        "CUSIP": ["CUSIP"],
+        "CIK": ["CIK"],
+        "ISIN": ["ISIN"],
+        "SEDOL": ["SEDOL"],
+        "FIGI": ["FIGI", "BLOOMBERG"],
+        "LEI": ["LEI", "LEGAL ENTITY IDENTIFIER"],
+        "EIN": ["EIN", "TAX ID", "EMPLOYER IDENTIFICATION"],
+        "SEC_FILE": ["SEC FILE", "FILE NUMBER", "FILE NO"],
+        "security": []  # Generic fallback
+    }
+    
+    # Check if comment mentions THIS specific identifier type
+    if identifier_type.upper() in identifier_map or identifier_type in identifier_map:
+        key = identifier_type.upper() if identifier_type.upper() in identifier_map else identifier_type
+        for term in identifier_map.get(key, []):
+            if term in comment_u:
+                return True  # POSITIVE CONFIRMATION - explicitly mentioned
+    
+    # RULE 2: EXPLICIT BLOCK - If comment mentions a DIFFERENT specific identifier type, BLOCK
+    other_identifiers = ["EIN", "TAX ID", "CIK", "CUSIP", "ISIN", "SEDOL", "FIGI", "LEI", 
+                         "TICKER", "STOCK SYMBOL", "SEC FILE", "FILE NUMBER"]
+    
+    for other_id in other_identifiers:
+        if other_id in comment_u:
+            # This is a different identifier type - block detection
+            # Exception: generic terms that might appear in multiple contexts
+            if other_id not in ["ID", "NUMBER", "CODE"]:
+                return False
+    
+    # RULE 3: NARRATIVE BLOCK - Descriptive language that indicates this is NOT a security ID
+    block_terms = [
+        "NAME", "PERSON", "EXECUTIVE", "CEO", "CFO", "PRESIDENT",
+        "ADDRESS", "STREET", "LOCATION", "CITY",
+        "DESCRIPTION", "NARRATIVE", "TEXT", "PARAGRAPH",
+        "TITLE", "ROLE", "POSITION",
+        "EMAIL", "PHONE", "CONTACT",
+        "SETTLEMENT", "LAWSUIT", "LEGAL CASE"
+    ]
+    
+    if any(term in comment_u for term in block_terms):
+        return False
+    
+    # RULE 4: NEUTRAL/EMPTY - ALLOW (generic security language or neutral)
+    # If we got here, comment doesn't explicitly mention any identifier
+    # and doesn't have blocking terms, so allow it
+    return True
+
+def check_ticker_symbols(df: pd.DataFrame) -> Dict:
+    """Two-stage check for stock ticker symbols with strict context gating."""
+    has_ticker = False
+    detected = []
+
+    # Stage 1: Detection with context + Comment gating (File no longer blocks detection)
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        if (
+            ticker_context_applies(category)
+            and re.match(r'^[A-Z]{1,5}$', before_val)
+            and ticker_comment_allows_detection(comment)
+        ):
+            has_ticker = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After'],
+            })
+
+    if not has_ticker:
+        return {
+            'passed': False,
+            'message': 'No stock tickers detected (e.g., AAPL, MSFT, GOOGL)',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    # Stage 2: Enforcement
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.upper())
+
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        file_val = str(row.get('File', '')) if 'File' in df.columns else ''
+
+        if (
+            ticker_context_applies(category)
+            and re.match(r'^[A-Z]{1,5}$', before_val)
+            and ticker_comment_allows_detection(comment)
+            and after_val
+        ):
+            problem = None
+
+            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+                problem = f"After ticker '{after_val}' is a real identifier from Before column"
+            elif not re.match(r'^[A-Z]{1,5}$', after_val):
+                problem = f"After value doesn't match ticker format (1–5 uppercase letters)"
+            elif abs(len(before_val) - len(after_val)) > 1:
+                problem = f"Ticker length changed significantly: {len(before_val)} → {len(after_val)} characters"
+
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+
+    if issues:
+        return {
+            'passed': False,
+            'message': f'Found {len(issues)} stock ticker(s) with anonymization problems',
+            'severity': 'error',
+            'rows': issues
+        }
+
+    return {
+        'passed': True,
+        'message': f'All stock tickers anonymized correctly ({len(detected)} found)',
+        'severity': 'pass',
+        'rows': detected
+    }
+
+def check_figi_ids(df: pd.DataFrame) -> Dict:
+    """Two-stage check for FIGI codes (Financial Instrument Global Identifier) - BBG prefix"""
+    # Stage 1: Check if any FIGIs exist
+    has_figi = False
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if security_id_context_applies(category) and detect_figi(before_val) and security_id_comment_allows_detection(comment, "FIGI"):
+            has_figi = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_figi:
+        return {
+            'passed': False,
+            'message': 'No FIGI codes detected (Bloomberg IDs like BBG000BLNQ16)',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.upper())
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "FIGI") and detect_figi(before_val) and after_val:
+            problem = None
+            
+            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+                problem = f"After FIGI '{after_val}' is a real identifier from Before column"
+            elif not re.match(r'^BBG[A-Z0-9]{9}$', after_val):
+                problem = f"After value doesn't match FIGI format (BBG + 9 alphanumeric characters)"
+            elif len(before_val) != len(after_val):
+                problem = f"FIGI length mismatch: {len(before_val)} → {len(after_val)} characters"
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All FIGI codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} FIGI(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def check_lei_ids(df: pd.DataFrame) -> Dict:
+    """Two-stage check for LEI codes (Legal Entity Identifier)"""
+    
+    # Stage 1: Check if any LEIs exist
+    has_lei = False
+    detected = []
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+        
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "LEI") and detect_lei(before_val):
+            has_lei = True
+            detected.append({
+                'excel_row': idx + 2,
+                'category': category,
+                'before': row['Before'],
+                'after': row['After']
+            })
+    
+    if not has_lei:
+        return {
+            'passed': False,
+            'message': 'No LEI codes detected (legal entity IDs, 20 characters)',
+            'severity': 'warning',
+            'rows': []
+        }
+    
+    # Stage 2: Check After values
+    issues = []
+    before_values = set(df['Before'].dropna().astype(str).str.upper())
+    
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        
+        if security_id_context_applies(category) and detect_lei(before_val) and after_val:
+            problem = None
+            
+            if after_val.upper() in before_values and after_val.upper() != before_val.upper():
+                problem = f"After LEI '{after_val}' is a real identifier from Before column"
+            elif not re.match(r'^[A-Z0-9]{20}$', after_val):
+                problem = f"After value doesn't match LEI format (20 alphanumeric characters)"
+            elif len(before_val) != len(after_val):
+                problem = f"LEI length mismatch: {len(before_val)} → {len(after_val)} characters"
+            
+            if problem:
+                issues.append({
+                    'excel_row': idx + 2,
+                    'category': category,
+                    'before': row['Before'],
+                    'after': row['After'],
+                    'problem': problem
+                })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All LEI codes validated successfully ({len(detected)} found)' if len(issues) == 0 else f'❌ Found {len(issues)} LEI(s) with problems',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': detected if len(issues) == 0 else issues
+    }
+
+def check_retail_labels(df: pd.DataFrame) -> Dict:
+    """Check if retail-related labels exist - warn if none found"""
+    retail_terms = ['retail', 'franchise', 'store', 'branch', 'outlet', 'shop']
+    category_col = df['Category'].astype(str).str.lower()
+    
+    has_retail = any(category_col.str.contains(term, na=False).any() for term in retail_terms)
+    
+    return {
+        'passed': has_retail,
+        'message': f'Found {retail_count} retail/franchise categories' if has_retail else '⚠️ No retail/store/franchise categories found - consider if multi-location identifiers need anonymization',
+        'severity': 'pass' if has_retail else 'warning',
+        'rows': []
+    }
+
+def check_executive_honorifics(df: pd.DataFrame) -> Dict:
+    """
+    Semantic integrity check for executive naming conventions.
+
+    This is not a structural identifier check. It ensures narrative and
+    anonymization completeness for people-related entries and is
+    intentionally excluded from the Detect → Context → Enforce framework.
+    """
+    issues = []
+    
+    # Get all executive rows
+    exec_df = df[df['Category'].str.upper() == 'EXECUTIVES']
+    
+    # Extract full names (assuming format: "FirstName LastName")
+    full_names = []
+    for idx, row in exec_df.iterrows():
+        before_val = str(row['Before']) if pd.notna(row['Before']) else ''
+        # Check if it's a full name (at least 2 words, no honorifics)
+        words = before_val.split()
+        if len(words) >= 2 and not any(h in before_val for h in ['Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Mr', 'Mrs', 'Ms', 'Dr']):
+            full_names.append({
+                'excel_row': idx + 2,
+                'name': before_val,
+                'last_name': words[-1],
+                'after': row['After']
+            })
+    
+    # For each full name, check if honorific variant exists
+    for name_info in full_names:
+        last_name = name_info['last_name']
+        # Check if any Before value has honorific + this last name
+        has_honorific = exec_df['Before'].astype(str).str.contains(
+            f'(Mr|Mrs|Ms|Dr)\.?\s+{last_name}', 
+            case=False, 
+            na=False
+        ).any()
+        
+        if not has_honorific:
+            issues.append({
+                'excel_row': name_info['excel_row'],
+                'before': name_info['name'],
+                'after': name_info['after'],
+                'missing': f'Need: Mr./Mrs./Ms. {last_name} variant'
+            })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All executive names have proper title variants' if len(issues) == 0 else f'⚠️ Found {len(issues)} executive(s) missing honorific entries (Mr./Mrs./Ms. LastName)',
+        'severity': 'pass' if len(issues) == 0 else 'warning',
+        'rows': issues
+    }
+
+def check_name_recycling(df: pd.DataFrame) -> Dict:
+    """Check if first or last names from Before appear in After"""
+    issues = []
+    
+    # Get executive rows
+    exec_df = df[df['Category'].str.upper() == 'EXECUTIVES']
+    
+    # Extract names from Before column
+    before_names = set()
+    for before_val in exec_df['Before'].dropna():
+        words = str(before_val).split()
+        # Extract first and last names (skip honorifics and middle initials)
+        clean_words = [w.strip('.,()') for w in words if w not in ['Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Mr', 'Mrs', 'Ms', 'Dr', 'A.', 'N.', 'M.', 'C.']]
+        before_names.update(clean_words)
+    
+    # Check if any Before names appear in After
+    for idx, row in exec_df.iterrows():
+        after_val = str(row['After']) if pd.notna(row['After']) else ''
+        after_words = after_val.split()
+        after_clean = [w.strip('.,()') for w in after_words if w not in ['Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Mr', 'Mrs', 'Ms', 'Dr', 'A.', 'N.', 'M.', 'C.']]
+        
+        # Check for recycled names
+        recycled = [name for name in after_clean if name in before_names]
+        if recycled:
+            # Format each name clearly - use bullet points or line breaks
+            recycled_display = ' | '.join([f'"{name}"' for name in recycled])
+            
+            issues.append({
+                'excel_row': idx + 2,
+                'before': row['Before'],
+                'after': row['After'],
+                'recycled_names': recycled_display
+            })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'No name recycling detected (Before names not reused in After)' if len(issues) == 0 else f'❌ Found {len(issues)} instance(s) where After names appear in Before column',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': issues
+    }
+
+def check_after_in_before(df: pd.DataFrame) -> Dict:
+    """Check if any After values appear in Before column"""
+    issues = []
+    
+    # Get all Before and After values
+    before_set = set(df['Before'].dropna().astype(str))
+    
+    for idx, row in df.iterrows():
+        after_val = str(row['After']) if pd.notna(row['After']) else ''
+        if after_val and after_val in before_set:
+            issues.append({
+                'excel_row': idx + 2,
+                'category': row['Category'],
+                'before': row['Before'],
+                'after': row['After'],
+                'problem': f'After value "{after_val}" also appears in Before column'
+            })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'No cross-contamination detected (After values unique)' if len(issues) == 0 else f'❌ Found {len(issues)} After value(s) that also appear in Before (not anonymizing)',
+        'severity': 'pass' if len(issues) == 0 else 'error',
+        'rows': issues
+    }
+
+def check_numeric_consistency(df: pd.DataFrame) -> Dict:
+    """
+    Heuristic consistency check for structured numeric identifiers.
+
+    This is NOT a first-class identifier check. It acts as a backstop to
+    detect structural breakage introduced during anonymization and is
+    intentionally heuristic and category-limited.
+    """
+    
+    def is_structured_id(val):
+        """Determine if value looks like a structured ID (not an address or narrative text)"""
+        if not val or len(val) > 30:
+            return False
+        
+        # Remove spaces and hyphens for analysis
+        cleaned = re.sub(r'[\s\-]', '', val)
+        
+        if len(cleaned) == 0:
+            return False
+        
+        # Structured IDs are mostly alphanumeric (>80%)
+        alphanum_count = sum(c.isalnum() for c in cleaned)
+        alphanum_ratio = alphanum_count / len(cleaned)
+        
+        # Also check it's not too long (structured IDs are typically < 20 chars after cleaning)
+        return alphanum_ratio > 0.8 and len(cleaned) <= 20
+    
+    issues = []
+    
+    for idx, row in df.iterrows():
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        
+        # Only check COMPANY INFO category where format consistency matters
+        if 'COMPANY INFO' not in category.upper():
+            continue
+        
+        before_val = str(row['Before']) if pd.notna(row['Before']) else ''
+        after_val = str(row['After']) if pd.notna(row['After']) else ''
+        
+        # Only check if both values look like structured IDs
+        if not (is_structured_id(before_val) and is_structured_id(after_val)):
+            continue
+        
+        # Extract digit sequences
+        before_digits = re.findall(r'\d+', before_val)
+        after_digits = re.findall(r'\d+', after_val)
+        
+        # Check if both have numbers and digit counts don't match
+        if before_digits and after_digits:
+            before_lens = [len(d) for d in before_digits]
+            after_lens = [len(d) for d in after_digits]
+            
+            # Check if digit pattern lengths are preserved
+            if len(before_lens) == len(after_lens):
+                mismatch = False
+                for b_len, a_len in zip(before_lens, after_lens):
+                    if b_len != a_len:
+                        mismatch = True
+                        break
+                
+                if mismatch:
+                    issues.append({
+                        'excel_row': idx + 2,
+                        'category': category,
+                        'before': row['Before'],
+                        'after': row['After'],
+                        'problem': 'Security ID format appears inconsistent - Before has different structure than After'
+                    })
+    
+    return {
+        'passed': len(issues) == 0,
+        'message': f'All security ID formats preserved correctly' if len(issues) == 0 else f'⚠️ Found {len(issues)} security ID(s) with inconsistent formats',
+        'severity': 'pass' if len(issues) == 0 else 'warning',
+        'rows': issues
+    }
+
+def run_all_checks(df: pd.DataFrame) -> List[Dict]:
+    """Run all QC checks and return results"""
+    
+    checks = [
+        # Links & URLs
+        ("SEC Links", check_sec_links),
+        ("After URL Leakage", check_after_link_leakage),
+        
+        # Financial Identifiers
+        ("CIK Numbers", check_cik_ids),
+        ("EIN Numbers", check_ein_ids),
+        ("SEC File Numbers", check_sec_file_numbers),
+        
+        # Security Identifiers
+        ("CUSIP Codes", check_cusip_ids),
+        ("ISIN Codes", check_isin_ids),
+        ("SEDOL Codes", check_sedol_ids),
+        ("Stock Tickers", check_ticker_symbols),
+        ("FIGI Codes", check_figi_ids),
+        ("LEI Codes", check_lei_ids),
+        
+        # Content Validation
+        ("Patent Numbers", check_patent_ids),
+        ("Retail Labels", check_retail_labels),
+        ("Executive Names", check_executive_honorifics),
+        
+        # Cross-Validation
+        ("Name Recycling", check_name_recycling),
+        ("After in Before", check_after_in_before),
+        ("Deletion Entries", check_deletion_entries),
+        ("Format Consistency", check_numeric_consistency)
+    ]
+    
+    results = []
+    for check_name, check_func in checks:
+        result = check_func(df)
+        result['check_name'] = check_name
+        results.append(result)
+    
+    return results
+
+# Main app logic
+if uploaded_file:
+    try:
+        # Load file
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+        
+        st.success(f"✅ File loaded: {len(df)} rows, {len(df.columns)} columns")
+        
+        # Show file preview
+        with st.expander("📄 Preview Data (all rows)"):
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                height=min(800, 35 * len(df))  # dynamic height with sensible cap
+            )
+        
+        # Run checks
+        st.markdown("---")
+        st.header("🔍 QC Results")
+        
+        results = run_all_checks(df)
+        
+        # Count issues
+        errors = sum(1 for r in results if r['severity'] == 'error')
+        warnings = sum(1 for r in results if r['severity'] == 'warning')
+        passed = sum(1 for r in results if r['severity'] == 'pass')
+        
+        # Overall status banner
+        if errors > 0:
+            st.error(f"🔴 **{errors} Critical Issue(s) Found** - Must fix before proceeding")
+        elif warnings > 0:
+            st.warning(f"🟡 **{warnings} Warning(s)** - Review recommended but not required")
+        else:
+            st.success(f"🟢 **All Checks Passed** - Document appears properly anonymized")
+        
+        # Summary metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("✅ Passed", passed)
+        col2.metric("⚠️ Warnings", warnings)
+        col3.metric("❌ Errors", errors)
+        
+        st.markdown("---")
+        
+        # Display results with grouping
+        check_groups = {
+            "Links & URLs": ["SEC Links", "After URL Leakage"],
+            "Financial Identifiers": ["CIK Numbers", "EIN Numbers", "SEC File Numbers"],
+            "Security Identifiers": ["CUSIP Codes", "ISIN Codes", "SEDOL Codes", "Stock Tickers", "FIGI Codes", "LEI Codes"],
+            "Content Validation": ["Patent Numbers", "Retail Labels", "Executive Names"],
+            "Cross-Validation": ["Name Recycling", "After in Before", "Deletion Entries", "Format Consistency"]
+        }
+        
+        for group_name, check_names in check_groups.items():
+            # Check if any checks in this group have results
+            group_results = [r for r in results if r['check_name'] in check_names]
+            if not group_results:
+                continue
+                
+            st.subheader(group_name)
+            
+            for result in group_results:
+                # Determine icon and styling
+                if result['severity'] == 'error':
+                    icon = "❌"
+                    st.error(f"**{icon} {result['check_name']}**: {result['message']}")
+                elif result['severity'] == 'warning':
+                    icon = "⚠️"
+                    st.warning(f"**{icon} {result['check_name']}**: {result['message']}")
+                else:
+                    icon = "✅"
+                    st.success(f"**{icon} {result['check_name']}**: {result['message']}")
+                
+                # Show details if there are issues
+                if result['rows'] and len(result['rows']) > 0:
+                    issue_count = len(result['rows'])
+                    if result['severity'] == 'error':
+                        expander_label = f"🔴 View {issue_count} issue(s) requiring attention"
+                    elif result['severity'] == 'warning':
+                        expander_label = f"⚠️ View {issue_count} item(s) to review"
+                    else:
+                        expander_label = f"✓ View {issue_count} item(s) validated"
+                    
+                    with st.expander(expander_label):
+                        if result['severity'] == 'error':
+                            st.caption("⚠️ **Action Required**: Fix these issues in your tracker and re-upload")
+                        
+                        if isinstance(result['rows'][0], dict):
+                            # Create a cleaner DataFrame for display
+                            display_df = pd.DataFrame(result['rows'])
+                            
+                            # Rename excel_row to something clearer
+                            if 'excel_row' in display_df.columns:
+                                display_df = display_df.rename(columns={'excel_row': '📍 Excel Row'})
+                                # Move Excel Row to first column
+                                cols = ['📍 Excel Row'] + [col for col in display_df.columns if col != '📍 Excel Row']
+                                display_df = display_df[cols]
+                            
+                            st.dataframe(
+                                display_df,
+                                use_container_width=True,
+                                hide_index=True
+                            )
+                        else:
+                            st.write(f"Excel Rows: {', '.join(map(str, result['rows']))}")
+            
+            st.markdown("---")
+        
+    except Exception as e:
+        st.error(f"❌ Error processing file: {str(e)}")
+        st.exception(e)
+
+else:
+    st.info("👆 Upload an anonymization tracker file to begin QC checks")
+    
+    # Show example of what we're checking
+    st.markdown("---")
+    st.subheader("What this tool checks:")
+    
+    with st.expander("ℹ️ About This Tool"):
+        st.markdown("""
+        This tool validates anonymization trackers to ensure sensitive information has been 
+        properly anonymized before document release.
+        
+        **How it works:**
+        - **Before column**: Original sensitive values that need anonymization
+        - **After column**: Replacement values (anonymized versions)
+        - The tool checks format preservation, detects leakage, and validates consistency
+        
+        **Severity Levels:**
+        - 🔴 **Error**: Critical issue that MUST be fixed (data leakage, format violations)
+        - 🟡 **Warning**: Informational - expected identifiers not found (may be OK)
+        - 🟢 **Pass**: Check completed successfully, no issues detected
+        """)
+    
+    checks_info = """
+    ### 🔗 Links & URLs (2 checks)
+    1. **SEC Links** - Verifies SEC.gov URLs exist and are properly anonymized
+    2. **After URL Leakage** - Ensures After URLs don't contain Before identifiers
+    
+    ### 🔑 Financial Identifiers (3 checks)
+    3. **CIK Numbers** - SEC company identifiers (e.g., 0001018724)
+    4. **EIN Numbers** - Tax identification numbers (e.g., 12-3456789)
+    5. **SEC File Numbers** - SEC filing numbers (e.g., 001-12345)
+    
+    ### 📈 Security Identifiers (6 checks)
+    6. **CUSIP Codes** - US/Canada securities (e.g., 037833100)
+    7. **ISIN Codes** - International securities (e.g., US0378331005)
+    8. **SEDOL Codes** - UK securities (e.g., 2046251)
+    9. **Stock Tickers** - Trading symbols (e.g., AAPL, MSFT)
+    10. **FIGI Codes** - Bloomberg identifiers (e.g., BBG000BLNQ16)
+    11. **LEI Codes** - Legal entity identifiers (20 characters)
+    
+    ### 📝 Content Validation (3 checks)
+    12. **Patent Numbers** - Patent identifiers (e.g., US1234567)
+    13. **Retail Labels** - Store/franchise/retail categories
+    14. **Executive Names** - Executive titles and honorifics (Mr./Mrs.)
+    
+    ### 🔄 Cross-Validation (4 checks)
+    15. **Name Recycling** - Prevents reusing Before names in After column
+    16. **After in Before** - Ensures After values don't appear in Before column
+    17. **Deletion Entries** - Confirms some terms are marked for deletion (blank After)
+    18. **Format Consistency** - Validates digit patterns are preserved in anonymized IDs
+    """
+    
+    st.markdown(checks_info)
