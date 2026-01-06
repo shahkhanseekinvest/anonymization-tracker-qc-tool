@@ -2,3 +2,6 @@ streamlit
 pandas
 numpy
 openpyxl
+spacy>=3.0.0
+email-validator
+phonenumbers

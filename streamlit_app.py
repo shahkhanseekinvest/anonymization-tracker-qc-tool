@@ -2,6 +2,22 @@ import streamlit as st
 import pandas as pd
 import re
 from typing import List, Dict, Tuple, Optional
+import spacy
+from email_validator import validate_email, EmailNotValidError
+import phonenumbers
+
+# -------------------------
+# Load spaCy model once (cached for performance, lazy-loaded)
+# -------------------------
+@st.cache_resource
+def load_spacy_model():
+    """Load spaCy model once and cache it"""
+    try:
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        # Return None if model not found - we'll show error message later
+        return None
+
 # -------------------------
 # Shared context gates
 # -------------------------
@@ -241,6 +257,120 @@ def detect_ticker(val: str) -> Optional[str]:
         return None
     cleaned = val.strip().upper()
     return cleaned if re.match(r'^[A-Z]{1,5}$', cleaned) else None
+
+
+# -------------------------
+# Blocking logic for Wave 1 checks (permissive with exceptions)
+# -------------------------
+def should_block_company_name_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT a company name.
+    Block if it's clearly about people, emails, phones, addresses, or security IDs.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # People/Individuals
+        "EXECUTIVE", "PERSON", "INDIVIDUAL", "NAME", "DIRECTOR", "OFFICER",
+        # Contact info
+        "EMAIL", "PHONE", "TELEPHONE", "FAX",
+        # Addresses
+        "ADDRESS", "STREET", "LOCATION",
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER"
+    ]
+
+    return any(term in context for term in block_terms)
+
+
+def should_block_address_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT an address.
+    Block if it's clearly about people, companies, emails, phones, or security IDs.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # People/Individuals
+        "EXECUTIVE", "PERSON", "INDIVIDUAL", "DIRECTOR", "OFFICER",
+        # Companies (full entity names, not addresses)
+        "COMPANY NAME", "ORGANIZATION NAME", "ENTITY NAME",
+        # Contact info
+        "EMAIL", "PHONE", "TELEPHONE", "FAX", "WEBSITE",
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER"
+    ]
+
+    return any(term in context for term in block_terms)
+
+
+def should_block_email_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT an email.
+    Block if it's clearly about security IDs, company names, or addresses.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER", "SEC FILE",
+        # Addresses (physical locations, not email addresses)
+        "STREET", "PHYSICAL ADDRESS", "MAILING ADDRESS", "OFFICE LOCATION",
+        # Company names (entity names, not email domains)
+        "COMPANY NAME", "ORGANIZATION NAME", "ENTITY NAME"
+    ]
+
+    return any(term in context for term in block_terms)
+
+
+def should_block_phone_detection(category: str, comment: str) -> bool:
+    """
+    Returns True if category/comment indicates this is NOT a phone number.
+    Block if it's clearly about security IDs, company names, or emails.
+
+    Philosophy: Detect everywhere UNLESS explicitly blocked.
+    """
+    if pd.isna(category):
+        category = ""
+    if pd.isna(comment):
+        comment = ""
+
+    context = f"{str(category)} {str(comment)}".upper()
+
+    block_terms = [
+        # Security IDs
+        "CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TICKER", "SEC FILE",
+        # Email
+        "EMAIL", "E-MAIL",
+        # Addresses (physical locations)
+        "STREET ADDRESS", "PHYSICAL ADDRESS", "MAILING ADDRESS",
+        # Company names
+        "COMPANY NAME", "ORGANIZATION NAME", "ENTITY NAME"
+    ]
+
+    return any(term in context for term in block_terms)
+
 
 st.set_page_config(
     page_title="Anonymization Tracker QC Tool",
@@ -1161,14 +1291,214 @@ def check_retail_labels(df: pd.DataFrame) -> Dict:
     """Check if retail-related labels exist - warn if none found"""
     retail_terms = ['retail', 'franchise', 'store', 'branch', 'outlet', 'shop']
     category_col = df['Category'].astype(str).str.lower()
-    
+
     has_retail = any(category_col.str.contains(term, na=False).any() for term in retail_terms)
-    
+
     return {
         'passed': has_retail,
         'message': f'Found {retail_count} retail/franchise categories' if has_retail else '⚠️ No retail/store/franchise categories found - consider if multi-location identifiers need anonymization',
         'severity': 'pass' if has_retail else 'warning',
         'rows': []
+    }
+
+def check_email_addresses(df: pd.DataFrame) -> Dict:
+    """Detection check for email addresses in Before column"""
+    detected = []
+
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT an email
+        if should_block_email_detection(category, comment):
+            continue
+
+        if before_val and before_val.lower() != 'nan':
+            # Try to validate as email
+            try:
+                validate_email(before_val, check_deliverability=False)
+                detected.append({
+                    'excel_row': idx + 2,
+                    'category': row['Category'],
+                    'email': before_val,
+                    'after': row['After']
+                })
+            except EmailNotValidError:
+                # Not an email, skip
+                pass
+
+    if len(detected) == 0:
+        return {
+            'passed': False,
+            'message': 'No email addresses detected (e.g., user@example.com)',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    return {
+        'passed': True,
+        'message': f'Found {len(detected)} email address(es) in tracker',
+        'severity': 'pass',
+        'rows': detected
+    }
+
+def check_phone_numbers(df: pd.DataFrame) -> Dict:
+    """Detection check for phone numbers in Before column"""
+    detected = []
+
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT a phone number
+        if should_block_phone_detection(category, comment):
+            continue
+
+        if before_val and before_val.lower() != 'nan':
+            # Try to find phone numbers (default to US region)
+            try:
+                for match in phonenumbers.PhoneNumberMatcher(before_val, "US"):
+                    detected.append({
+                        'excel_row': idx + 2,
+                        'category': row['Category'],
+                        'phone_number': match.raw_string,
+                        'after': row['After']
+                    })
+                    break  # Only capture first match per row
+            except:
+                # If parsing fails, skip
+                pass
+
+    if len(detected) == 0:
+        return {
+            'passed': False,
+            'message': 'No phone numbers detected (e.g., 555-123-4567)',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    return {
+        'passed': True,
+        'message': f'Found {len(detected)} phone number(s) in tracker',
+        'severity': 'pass',
+        'rows': detected
+    }
+
+def check_addresses(df: pd.DataFrame) -> Dict:
+    """Detection check for addresses using spaCy GPE/LOC entities"""
+    # Lazy-load spaCy model
+    nlp = load_spacy_model()
+
+    if nlp is None:
+        return {
+            'passed': False,
+            'message': '⚠️ spaCy model not loaded - cannot detect addresses',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    detected = []
+
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT an address
+        if should_block_address_detection(category, comment):
+            continue
+
+        if before_val and before_val.lower() != 'nan' and len(before_val) > 10:
+            # Use spaCy to detect location entities (cities, states, countries)
+            doc = nlp(before_val)
+            has_location = False
+            location_entities = []
+
+            for ent in doc.ents:
+                if ent.label_ in ["GPE", "LOC"]:  # Geopolitical entity or location
+                    has_location = True
+                    location_entities.append(ent.text)
+
+            if has_location:
+                detected.append({
+                    'excel_row': idx + 2,
+                    'category': row['Category'],
+                    'address_text': before_val,
+                    'locations_found': ', '.join(location_entities),
+                    'after': row['After']
+                })
+
+    if len(detected) == 0:
+        return {
+            'passed': False,
+            'message': 'No addresses detected (city/state/location indicators)',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    return {
+        'passed': True,
+        'message': f'Found {len(detected)} address(es) with location indicators',
+        'severity': 'pass',
+        'rows': detected
+    }
+
+def check_company_names(df: pd.DataFrame) -> Dict:
+    """Detection check for company/organization names using spaCy NER"""
+    # Lazy-load spaCy model
+    nlp = load_spacy_model()
+
+    if nlp is None:
+        return {
+            'passed': False,
+            'message': '⚠️ spaCy model not loaded - cannot detect company names',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    detected = []
+
+    for idx, row in df.iterrows():
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
+
+        # BLOCKING LOGIC: Skip if category/comment indicates this is NOT a company name
+        if should_block_company_name_detection(category, comment):
+            continue
+
+        if before_val and before_val.lower() != 'nan':
+            # Use spaCy NER to detect organizations
+            doc = nlp(before_val)
+            companies_found = []
+
+            for ent in doc.ents:
+                if ent.label_ == "ORG":
+                    companies_found.append(ent.text)
+
+            if companies_found:
+                detected.append({
+                    'excel_row': idx + 2,
+                    'category': row['Category'],
+                    'company_name': ', '.join(companies_found),
+                    'after': row['After']
+                })
+
+    if len(detected) == 0:
+        return {
+            'passed': False,
+            'message': 'No company/organization names detected',
+            'severity': 'warning',
+            'rows': []
+        }
+
+    return {
+        'passed': True,
+        'message': f'Found {len(detected)} company/organization name(s) in tracker',
+        'severity': 'pass',
+        'rows': detected
     }
 
 def check_executive_honorifics(df: pd.DataFrame) -> Dict:
@@ -1496,6 +1826,10 @@ def run_all_checks(df: pd.DataFrame) -> List[Dict]:
         # Content Validation
         ("Patent Numbers", check_patent_ids),
         ("Retail Labels", check_retail_labels),
+        ("Email Addresses", check_email_addresses),
+        ("Phone Numbers", check_phone_numbers),
+        ("Addresses", check_addresses),
+        ("Company Names", check_company_names),
         ("Executive Names", check_executive_honorifics),
         ("First Names Separate", check_first_names_separate_rows),
 
@@ -1577,6 +1911,10 @@ if uploaded_file:
             "LEI Codes": "Security Identifiers",
             "Patent Numbers": "Content Validation",
             "Retail Labels": "Content Validation",
+            "Email Addresses": "Content Validation",
+            "Phone Numbers": "Content Validation",
+            "Addresses": "Content Validation",
+            "Company Names": "Content Validation",
             "Executive Names": "Content Validation",
             "First Names Separate": "Content Validation",
             "Name Recycling": "Cross-Validation",
@@ -1590,6 +1928,11 @@ if uploaded_file:
         error_results = [r for r in results if r['severity'] == 'error']
         warning_results = [r for r in results if r['severity'] == 'warning']
         pass_results = [r for r in results if r['severity'] == 'pass']
+
+        # Sort pass_results: Company Names first, then all others in original order
+        company_names_result = [r for r in pass_results if r['check_name'] == 'Company Names']
+        other_pass_results = [r for r in pass_results if r['check_name'] != 'Company Names']
+        pass_results = company_names_result + other_pass_results
 
         # Helper function to display a single check result
         def display_check_result(result, use_expander=True):
@@ -1732,18 +2075,22 @@ else:
     10. **FIGI Codes** - Bloomberg identifiers (e.g., BBG000BLNQ16)
     11. **LEI Codes** - Legal entity identifiers (20 characters)
 
-    ### 📝 Content Validation (4 checks)
+    ### 📝 Content Validation (8 checks)
     12. **Patent Numbers** - Patent identifiers (e.g., US1234567)
     13. **Retail Labels** - Store/franchise/retail categories
-    14. **Executive Names** - Executive titles and honorifics (Mr./Mrs.)
-    15. **First Names Separate** - Ensures first names from full names have separate rows (EXECUTIVES)
+    14. **Email Addresses** - Email addresses in Before column (e.g., user@example.com)
+    15. **Phone Numbers** - Phone numbers in Before column (e.g., 555-123-4567)
+    16. **Addresses** - Address detection using city/state indicators
+    17. **Company Names** - Organization names detected using NLP
+    18. **Executive Names** - Executive titles and honorifics (Mr./Mrs.)
+    19. **First Names Separate** - Ensures first names from full names have separate rows (EXECUTIVES)
 
     ### 🔄 Cross-Validation (5 checks)
-    16. **Name Recycling** - Prevents reusing Before names in After column
-    17. **After in Before** - Ensures After values don't appear in Before column
-    18. **Blank Before Check** - Flags rows with blank Before but populated After values
-    19. **Deletion Entries** - Confirms some terms are marked for deletion (blank After)
-    20. **Format Consistency** - Validates digit patterns are preserved in anonymized IDs
+    20. **Name Recycling** - Prevents reusing Before names in After column
+    21. **After in Before** - Ensures After values don't appear in Before column
+    22. **Blank Before Check** - Flags rows with blank Before but populated After values
+    23. **Deletion Entries** - Confirms some terms are marked for deletion (blank After)
+    24. **Format Consistency** - Validates digit patterns are preserved in anonymized IDs
     """
     
     st.markdown(checks_info)
