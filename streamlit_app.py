@@ -1838,11 +1838,10 @@ def build_simple_summary(results: List[Dict], check_categories: Dict[str, str], 
         lines.append("==== ERRORS (Must Fix) ====")
         for result in error_results:
             check_name = result['check_name']
-            category = check_categories.get(check_name, '')
             message = result['message']
             # Strip emoji and special characters from message
             clean_message = message.replace('❌', '').replace('⚠️', '').replace('✅', '').strip()
-            lines.append(f"- {check_name} ({category}): {clean_message}")
+            lines.append(f"- {check_name}: {clean_message}")
         lines.append("")
     
     # Add warnings section if any
@@ -1851,11 +1850,10 @@ def build_simple_summary(results: List[Dict], check_categories: Dict[str, str], 
         lines.append("==== WARNINGS (Review Recommended) ====")
         for result in warning_results:
             check_name = result['check_name']
-            category = check_categories.get(check_name, '')
             message = result['message']
             # Strip emoji and special characters from message
             clean_message = message.replace('❌', '').replace('⚠️', '').replace('✅', '').strip()
-            lines.append(f"- {check_name} ({category}): {clean_message}")
+            lines.append(f"- {check_name}: {clean_message}")
         lines.append("")
     
     # Add footer
