@@ -11,6 +11,9 @@
 - Streamlit (web UI framework)
 - Pandas (data processing)
 - Regex (pattern matching)
+- spaCy (NLP for company names & addresses)
+- email-validator (RFC 5322 email validation)
+- phonenumbers (Google's libphonenumber library)
 
 ---
 
@@ -66,37 +69,80 @@ return {'severity': 'error' if issues else 'pass', 'rows': issues}
 }
 ```
 
+### 4. Permissive Blocking Pattern (Wave 1 Checks)
+
+**Wave 1 checks (email, phone, address, company names) follow this pattern**:
+
+```python
+# Default: Scan ALL rows
+for row in df:
+    category = row['Category']
+    comment = row['Comment']
+
+    # BLOCKING LOGIC: Skip ONLY when obviously wrong type
+    if should_block_detection(category, comment):
+        continue  # Skip this row
+
+    # Run detection on remaining rows
+    if pattern_matches(row['Before']):
+        detected.append(row)
+```
+
+**Philosophy**: Detect everywhere UNLESS explicitly blocked.
+
+**Why**:
+- Permissive by default (catches edge cases with unusual category names)
+- Simple to understand (just blocking terms, no complex rules)
+- Reduces false positives without missing detections
+
+**Blocking Functions**:
+- `should_block_email_detection()` - Blocks if: Security IDs, physical addresses, company names
+- `should_block_phone_detection()` - Blocks if: Security IDs, emails, addresses, company names
+- `should_block_address_detection()` - Blocks if: Executives, people, company names, contact info, security IDs
+- `should_block_company_name_detection()` - Blocks if: Executives, people, emails, phones, addresses, security IDs
+
 ---
 
 ## Code Structure
 
-### Main File: `streamlit_app.py` (~1,700 lines)
+### Main File: `streamlit_app.py` (~1,850 lines)
 
 **Sections**:
-1. **Lines 1-244**: Detection helpers & context gates
-2. **Lines 245-1173**: QC check functions (20 total)
-3. **Lines 1174-1367**: Additional validation functions
-4. **Lines 1368-1407**: `run_all_checks()` orchestrator
-5. **Lines 1408-1688**: Streamlit UI & results display
+1. **Lines 1-374**: Detection helpers, context gates, & blocking functions
+2. **Lines 375-1350**: QC check functions (24 total: 20 original + 4 Wave 1)
+3. **Lines 1351-1500**: Additional validation & spaCy-based checks
+4. **Lines 1501-1540**: `run_all_checks()` orchestrator
+5. **Lines 1541-1850**: Streamlit UI & results display
 
 ### Key Functions
 
 #### Check Functions (Return standard format)
+
+**Original 20 Checks:**
 ```python
-check_sec_links(df)                    # Lines 273-329
-check_after_link_leakage(df)           # Lines 331-373
-check_cik_ids(df)                      # Lines 479-541
-check_ein_ids(df)                      # Lines 741-790
-check_cusip_ids(df)                    # Lines 608-672
-check_isin_ids(df)                     # Lines 543-606
-check_ticker_symbols(df)               # Lines 952-1032
-check_patent_ids(df)                   # Lines 397-472
-check_executive_honorifics(df)         # Lines 1174-1224
-check_first_names_separate_rows(df)    # Lines 1226-1305
-check_name_recycling(df)               # Lines 1307-1365
-check_after_in_before(df)              # Lines 1267-1290
-check_blank_before_populated_after(df) # Lines 1292-1316
-check_deletion_entries(df)             # Lines 375-395
+check_sec_links(df)
+check_after_link_leakage(df)
+check_cik_ids(df)
+check_ein_ids(df)
+check_cusip_ids(df)
+check_isin_ids(df)
+check_ticker_symbols(df)
+check_patent_ids(df)
+check_executive_honorifics(df)
+check_first_names_separate_rows(df)
+check_name_recycling(df)
+check_after_in_before(df)
+check_blank_before_populated_after(df)
+check_deletion_entries(df)
+# ... (20 total)
+```
+
+**Wave 1 Checks (Detection-Only):**
+```python
+check_email_addresses(df)      # Uses email-validator library
+check_phone_numbers(df)        # Uses phonenumbers library
+check_addresses(df)            # Uses spaCy GPE/LOC entities
+check_company_names(df)        # Uses spaCy NER (ORG label)
 ```
 
 #### Detection Helpers (Return cleaned/normalized identifier or None)
@@ -206,6 +252,35 @@ detect_ticker(val)     # Lines 239-243
 - Reordered "First Names Separate" columns (after before missing_first_name)
 - Upgraded "Executive Names" from warning to error severity
 
+**Commit 5** (e2c3245): Added comprehensive CLAUDE.md project documentation
+- Created 400-line project guide with architecture patterns
+- Documented all checks, context gates, and implementation guidelines
+- Added testing guidelines and troubleshooting section
+
+**Commit 6** (c749696): Wave 1 - Added 4 new detection checks
+- Email Addresses check (WARNING severity, detection-only)
+- Phone Numbers check (WARNING severity, detection-only)
+- Addresses check (WARNING severity, uses spaCy GPE/LOC entities)
+- Company Names check (WARNING severity, uses spaCy NER)
+- Added dependencies: spacy>=3.0.0, email-validator, phonenumbers
+- Company Names displays first in passed checks
+
+**Commit 7** (73aa920): Fixed st.set_page_config error (first attempt)
+- Removed st.error() from load_spacy_model() function
+
+**Commit 8** (cdaaed6): Fixed st.set_page_config error with lazy-loading
+- Removed module-level nlp variable
+- Made spaCy model lazy-load inside check functions
+- Used @st.cache_resource to ensure model loads only once
+
+**Commit 9** (f04adfa): Added permissive blocking logic to reduce false positives
+- Added 4 blocking functions for Wave 1 checks
+- Permissive approach: Scan all by default, block only when obviously wrong type
+- Email blocks if: Security IDs, physical addresses, company names in category/comment
+- Phone blocks if: Security IDs, emails, addresses, company names
+- Address blocks if: Executives, people, company names, contact info, security IDs
+- Company names block if: Executives, people, emails, phones, addresses, security IDs
+
 ### Key Decisions
 
 1. **Why two-stage pattern?**
@@ -226,6 +301,13 @@ detect_ticker(val)     # Lines 239-243
    - Reduces cognitive load
    - Still accessible when needed
 
+5. **Why permissive blocking for Wave 1 checks?**
+   - Avoids missing detections in edge cases (unusual category names like "MISC", "OTHER")
+   - Simpler than Architecture B (positive confirmation) - no complex multi-rule logic
+   - Blocks only when obviously wrong (e.g., "EXECUTIVE" category blocks company name detection)
+   - Reduces false positives without false negatives
+   - Real-world data is messy - permissive approach is more robust
+
 ---
 
 ## Testing Guidelines
@@ -235,12 +317,16 @@ detect_ticker(val)     # Lines 239-243
 # Install dependencies
 pip install -r requirements.txt
 
+# Download spaCy model (required for Wave 1 address & company name checks)
+python -m spacy download en_core_web_sm
+
 # Run the app
 streamlit run streamlit_app.py
 ```
 
 ### Test Cases to Consider
 
+**Core Checks:**
 1. **Empty/NaN handling**: Upload tracker with blank values
 2. **Format preservation**: Check EIN hyphen format, CUSIP length
 3. **Context gating**: Put CUSIP in narrative field (should not flag)
@@ -248,13 +334,31 @@ streamlit run streamlit_app.py
 5. **Cross-contamination**: After values appearing in Before column
 6. **Nested expanders**: Passed checks with row details (should not error)
 
+**Wave 1 Checks:**
+7. **Email detection**: Category "EMAIL" or "WEBSITE" with valid emails
+8. **Phone detection**: Category "MAIN PHONE NUMBER" with phone numbers
+9. **Address detection**: Strings with city/state names (requires spaCy model)
+10. **Company name detection**: Organization names in appropriate categories
+11. **Blocking logic**: Email in "COMPANY INFO" + "CUSIP" comment should NOT detect email
+
 ### Common Test Data Patterns
 
+**Core Checks:**
 ```csv
 Category,Before,After,Comment
 COMPANY INFO,037833100,123456789,CUSIP
 EXECUTIVES,John Smith,Robert Abbey,
 EXECUTIVES,John,Robert,First name only
+```
+
+**Wave 1 Checks:**
+```csv
+Category,Before,After,Comment
+EMAIL,john@example.com,robert@abbey.com,
+WEBSITE,www.planetfitness.com,www.musclefitnessinc.com,
+MAIN PHONE NUMBER,(555) 123-4567,(555) 999-8888,
+MAIN ADDRESS,"26 Fox Run Road, Newington, New Hampshire 03801","10 Ross Avenue, Dallas, Texas 75201",
+COMPANY INFO,Planet Fitness Inc.,Muscle Mass Inc.,Organization name
 ```
 
 ---
@@ -345,12 +449,20 @@ def check_new_identifier(df: pd.DataFrame) -> Dict:
 ### Issue: NaN/empty values causing errors
 **Solution**: Always use `pd.notna()` checks and handle 'nan' string representation
 
+### Issue: spaCy model not loaded error for Wave 1 checks
+**Solution**: Run `python -m spacy download en_core_web_sm` to download the model. Address and Company Name checks will show warnings if model is missing.
+
+### Issue: st.set_page_config error
+**Solution**: Ensure no Streamlit commands (st.error, st.warning, etc.) run before st.set_page_config(). Use lazy-loading pattern with @st.cache_resource.
+
 ---
 
 ## Performance Considerations
 
 - **DataFrame operations**: Use vectorized pandas operations when possible
-- **Regex compilation**: Pre-compile regex patterns at module level (lines 56-125)
+- **Regex compilation**: Pre-compile regex patterns at module level
+- **spaCy model loading**: Model cached with @st.cache_resource, lazy-loaded only when checks run
+- **NLP performance**: spaCy processing is relatively slow; Wave 1 checks may take longer on large files
 - **Check independence**: All checks are independent and could be parallelized (future optimization)
 - **Large files**: Currently processes all rows in memory (consider chunking for >100k rows)
 
@@ -363,8 +475,9 @@ def check_new_identifier(df: pd.DataFrame) -> Dict:
 3. **Custom rules**: User-defined identifier patterns
 4. **API endpoint**: For automated QC pipelines
 5. **Historical tracking**: Compare multiple tracker versions
-6. **Additional patterns**: Email addresses, phone numbers, IP addresses
-7. **Performance**: Parallel check execution for large files
+6. **Wave 2 checks**: Employee aliases, user aliases (set-based matching)
+7. **Additional patterns**: IP addresses, URLs, social security numbers
+8. **Performance**: Parallel check execution for large files
 
 ---
 
@@ -397,4 +510,5 @@ A: Create a small CSV/Excel with test cases and upload via UI
 ---
 
 *Last updated: January 2026*
-*Tool version: 20 checks (18 original + 2 new)*
+*Tool version: 24 checks (20 original + 4 Wave 1 detection checks)*
+*Current branch: claude/check-repo-access-H0GC7 | Commit: f04adfa*
