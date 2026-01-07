@@ -1636,21 +1636,79 @@ def check_name_recycling(df: pd.DataFrame) -> Dict:
     # Extract names from Before column
     before_names = set()
     for before_val in exec_df['Before'].dropna():
-        words = str(before_val).split()
-        # Extract first and last names (skip honorifics and middle initials)
-        clean_words = [w.strip('.,()') for w in words if w not in ['Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Mr', 'Mrs', 'Ms', 'Dr', 'A.', 'N.', 'M.', 'C.']]
-        before_names.update(clean_words)
+        before_str = str(before_val).strip()
+        
+        # Skip 'nan' string values
+        if before_str.lower() == 'nan':
+            continue
+            
+        words = before_str.split()
+        # Extract first and last names (skip honorifics, middle initials, prefixes, suffixes)
+        for w in words:
+            w_clean = w.strip('.,()"\'')
+            
+            # Skip if empty after cleaning
+            if not w_clean:
+                continue
+                
+            # Skip honorifics
+            if w_clean.upper() in ['MR', 'MRS', 'MS', 'DR', 'MR.', 'MRS.', 'MS.', 'DR.']:
+                continue
+            
+            # Skip single letters (middle initials like "B.", "J.", "L.")
+            if len(w_clean.rstrip('.')) == 1:
+                continue
+            
+            # Skip common suffixes
+            if w_clean.upper() in ['JR', 'JR.', 'SR', 'SR.', 'II', 'III', 'IV']:
+                continue
+                
+            # Only add names with 2+ characters
+            if len(w_clean) >= 2:
+                before_names.add(w_clean)
     
     # Check if any Before names appear in After
     for idx, row in exec_df.iterrows():
-        after_val = str(row['After']) if pd.notna(row['After']) else ''
+        before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        
+        # Skip rows where Before or After is 'nan'
+        if before_val.lower() == 'nan' or after_val.lower() == 'nan':
+            continue
+        
+        if not after_val:
+            continue
+            
         after_words = after_val.split()
-        after_clean = [w.strip('.,()') for w in after_words if w not in ['Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Mr', 'Mrs', 'Ms', 'Dr', 'A.', 'N.', 'M.', 'C.']]
+        after_clean = []
+        
+        for w in after_words:
+            w_clean = w.strip('.,()"\'')
+            
+            # Skip if empty
+            if not w_clean:
+                continue
+                
+            # Skip honorifics
+            if w_clean.upper() in ['MR', 'MRS', 'MS', 'DR', 'MR.', 'MRS.', 'MS.', 'DR.']:
+                continue
+            
+            # Skip single letters
+            if len(w_clean.rstrip('.')) == 1:
+                continue
+            
+            # Skip suffixes
+            if w_clean.upper() in ['JR', 'JR.', 'SR', 'SR.', 'II', 'III', 'IV']:
+                continue
+                
+            # Only check names with 2+ characters
+            if len(w_clean) >= 2:
+                after_clean.append(w_clean)
         
         # Check for recycled names
         recycled = [name for name in after_clean if name in before_names]
         if recycled:
-            # Format each name clearly - use bullet points or line breaks
+            # Format each name clearly
             recycled_display = ' | '.join([f'"{name}"' for name in recycled])
             
             issues.append({
