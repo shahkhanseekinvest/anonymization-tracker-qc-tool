@@ -390,15 +390,7 @@ uploaded_file = st.file_uploader(
 )
 
 # File upload handling and DataFrame loading
-if uploaded_file:
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-    # Normalize critical text columns to string to avoid pandas / Arrow issues
-    for col in ["Before", "After", "Category", "File", "Comment"]:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
+# (Validation logic moved to validate_and_prepare_dataframe function)
 
 def check_sec_links(df: pd.DataFrame) -> Dict:
     """Two-stage check: (1) Warn if no SEC links exist, (2) Flag After value problems if they do exist"""
@@ -1866,6 +1858,47 @@ def build_simple_summary(results: List[Dict], check_categories: Dict[str, str], 
     
     return "\n".join(lines)
 
+def validate_and_prepare_dataframe(df: pd.DataFrame) -> tuple[bool, str, pd.DataFrame]:
+    """
+    Validate and prepare DataFrame for QC checks.
+    
+    Args:
+        df: Raw DataFrame from file upload
+    
+    Returns:
+        (is_valid, error_message, normalized_df)
+    """
+    # Step 1: Check if DataFrame is empty
+    if df is None or len(df) == 0 or len(df.columns) == 0:
+        return (False, "The uploaded file is empty. Please upload a tracker with data.", df)
+    
+    # Step 2: Check minimum column count (need at least Category and Before)
+    if len(df.columns) < 2:
+        return (False, "The file must have at least 2 columns. Please check your file format.", df)
+    
+    # Step 3: Normalize column names by position
+    # Map columns 0-4 to expected names, regardless of original names
+    expected_columns = ['Category', 'Before', 'After', 'File', 'Comment']
+    new_columns = expected_columns[:len(df.columns)]
+    df = df.copy()
+    df.columns = new_columns
+    
+    # Step 4: Check for minimum required data
+    # At least one of Before or After must have non-empty values
+    has_before_data = df['Before'].notna().any() if 'Before' in df.columns else False
+    has_after_data = df['After'].notna().any() if 'After' in df.columns else False
+    
+    if not (has_before_data or has_after_data):
+        return (False, "The tracker has no data in Before or After columns. Please add data to run QC checks.", df)
+    
+    # Step 5: Normalize column types to string
+    for col in ['Category', 'Before', 'After', 'File', 'Comment']:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+    
+    # Step 6: Success
+    return (True, "", df)
+
 def run_all_checks(df: pd.DataFrame) -> List[Dict]:
     """Run all QC checks and return results"""
 
@@ -1921,6 +1954,13 @@ if uploaded_file:
             df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
+        
+        # Validate and prepare DataFrame
+        is_valid, error_msg, df = validate_and_prepare_dataframe(df)
+        
+        if not is_valid:
+            st.error(f"❌ {error_msg}")
+            st.stop()  # Stop execution gracefully
         
         st.success(f"✅ File loaded: {len(df)} rows, {len(df.columns)} columns")
         
