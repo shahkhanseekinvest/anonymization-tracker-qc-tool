@@ -1802,6 +1802,72 @@ def check_numeric_consistency(df: pd.DataFrame) -> Dict:
         'rows': issues
     }
 
+def build_simple_summary(results: List[Dict], check_categories: Dict[str, str], filename: str) -> str:
+    """
+    Build a simple text summary of errors and warnings for download.
+    
+    Args:
+        results: List of check results from run_all_checks()
+        check_categories: Dict mapping check names to category labels
+        filename: Name of the uploaded file
+    
+    Returns:
+        Plain text summary string
+    """
+    # Count severities
+    total_checks = len(results)
+    errors = sum(1 for r in results if r['severity'] == 'error')
+    warnings = sum(1 for r in results if r['severity'] == 'warning')
+    passed = sum(1 for r in results if r['severity'] == 'pass')
+    
+    # Build summary text
+    lines = []
+    lines.append("Anonymization Tracker QC Summary")
+    lines.append(f"File: {filename}")
+    lines.append("")
+    lines.append("Summary:")
+    lines.append(f"- Total Checks: {total_checks}")
+    lines.append(f"- Errors: {errors}")
+    lines.append(f"- Warnings: {warnings}")
+    lines.append(f"- Passed: {passed}")
+    lines.append("")
+    
+    # Add errors section if any
+    error_results = [r for r in results if r['severity'] == 'error']
+    if error_results:
+        lines.append("==== ERRORS (Must Fix) ====")
+        for result in error_results:
+            check_name = result['check_name']
+            category = check_categories.get(check_name, '')
+            message = result['message']
+            # Strip emoji and special characters from message
+            clean_message = message.replace('❌', '').replace('⚠️', '').replace('✅', '').strip()
+            lines.append(f"- {check_name} ({category}): {clean_message}")
+        lines.append("")
+    
+    # Add warnings section if any
+    warning_results = [r for r in results if r['severity'] == 'warning']
+    if warning_results:
+        lines.append("==== WARNINGS (Review Recommended) ====")
+        for result in warning_results:
+            check_name = result['check_name']
+            category = check_categories.get(check_name, '')
+            message = result['message']
+            # Strip emoji and special characters from message
+            clean_message = message.replace('❌', '').replace('⚠️', '').replace('✅', '').strip()
+            lines.append(f"- {check_name} ({category}): {clean_message}")
+        lines.append("")
+    
+    # Add footer
+    if errors == 0 and warnings == 0:
+        lines.append("✓ All checks passed - no issues found.")
+        lines.append("")
+    
+    lines.append("---")
+    lines.append("Note: This is a high-level summary. For detailed row-by-row information, see the full QC report in the web interface.")
+    
+    return "\n".join(lines)
+
 def run_all_checks(df: pd.DataFrame) -> List[Dict]:
     """Run all QC checks and return results"""
 
@@ -1894,8 +1960,6 @@ if uploaded_file:
         col2.metric("⚠️ Warnings", warnings)
         col3.metric("❌ Errors", errors)
         
-        st.markdown("---")
-
         # Map check names to categories for display tags
         check_categories = {
             "SEC Links": "Links & URLs",
@@ -1923,6 +1987,18 @@ if uploaded_file:
             "Deletion Entries": "Cross-Validation",
             "Format Consistency": "Cross-Validation"
         }
+        
+        # Generate text summary and provide download button
+        summary_text = build_simple_summary(results, check_categories, uploaded_file.name)
+        st.download_button(
+            label="📥 Download Summary (Errors & Warnings)",
+            data=summary_text,
+            file_name="qc_summary.txt",
+            mime="text/plain",
+            help="Download a text file with high-level summary of all errors and warnings"
+        )
+        
+        st.markdown("---")
 
         # Group results by severity (maintaining original check order)
         error_results = [r for r in results if r['severity'] == 'error']
