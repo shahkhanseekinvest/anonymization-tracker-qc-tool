@@ -235,7 +235,14 @@ def detect_lei(val: str) -> Optional[str]:
     if not val:
         return None
     cleaned = re.sub(r'[\s\-]', '', val).upper()
-    return cleaned if re.match(r'^[A-Z0-9]{20}$', cleaned) else None
+    # LEI must be exactly 20 alphanumeric characters AND contain both letters and digits
+    # Example: 529900T8BM49AURSDO55
+    if re.match(r'^[A-Z0-9]{20}$', cleaned):
+        has_letter = any(c.isalpha() for c in cleaned)
+        has_digit = any(c.isdigit() for c in cleaned)
+        if has_letter and has_digit:
+            return cleaned
+    return None
 
 
 def detect_ein(val: str) -> Optional[str]:
@@ -1252,8 +1259,9 @@ def check_lei_ids(df: pd.DataFrame) -> Dict:
         before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
         category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
-        if security_id_context_applies(category) and detect_lei(before_val) and after_val:
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "LEI") and detect_lei(before_val) and after_val:
             problem = None
             
             if after_val.upper() in before_values and after_val.upper() != before_val.upper():
