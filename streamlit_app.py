@@ -1729,12 +1729,22 @@ def check_after_in_before(df: pd.DataFrame) -> Dict:
     """Check if any After values appear in Before column"""
     issues = []
 
-    # Get all Before and After values
-    before_set = set(df['Before'].dropna().astype(str))
+    # Get all Before values, excluding 'nan' strings
+    before_set = set()
+    for val in df['Before'].dropna():
+        val_str = str(val).strip()
+        # Skip 'nan' string values (empty cells)
+        if val_str.lower() != 'nan':
+            before_set.add(val_str)
 
     for idx, row in df.iterrows():
-        after_val = str(row['After']) if pd.notna(row['After']) else ''
-        if after_val and after_val in before_set:
+        after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
+        
+        # Skip if after_val is empty or 'nan'
+        if not after_val or after_val.lower() == 'nan':
+            continue
+            
+        if after_val in before_set:
             issues.append({
                 'excel_row': idx + 2,
                 'category': row['Category'],
