@@ -1877,11 +1877,16 @@ def validate_and_prepare_dataframe(df: pd.DataFrame) -> tuple[bool, str, pd.Data
         return (False, "The file must have at least 2 columns. Please check your file format.", df)
     
     # Step 3: Normalize column names by position
-    # Map columns 0-4 to expected names, regardless of original names
+    # Map columns 0-4 to expected names, keep extra columns as-is
     expected_columns = ['Category', 'Before', 'After', 'File', 'Comment']
-    new_columns = expected_columns[:len(df.columns)]
     df = df.copy()
-    df.columns = new_columns
+    
+    # Rename only the first 5 columns (or fewer if file has < 5 columns)
+    num_cols_to_rename = min(len(df.columns), len(expected_columns))
+    new_column_names = list(df.columns)  # Keep existing names
+    for i in range(num_cols_to_rename):
+        new_column_names[i] = expected_columns[i]
+    df.columns = new_column_names
     
     # Step 4: Check for minimum required data
     # At least one of Before or After must have non-empty values
