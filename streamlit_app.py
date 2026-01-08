@@ -83,39 +83,6 @@ def looks_like_ein(value: str) -> bool:
         EIN_REGEX_UNFORMATTED.match(value)
     )
 
-def ein_context_applies(category: str, comment: str = "") -> bool:
-    """
-    Context gate for EIN with positive confirmation and cross-check blocking.
-    
-    Rules:
-    1. POSITIVE CONFIRMATION: Comment explicitly mentions "EIN" → FORCE ALLOW
-    2. EXPLICIT BLOCK: Comment mentions different identifier → FORCE BLOCK
-    3. CATEGORY + KEYWORD: Standard allow (COMPANY/ENTITY/TAX context)
-    """
-    # Handle NaN
-    if pd.isna(comment):
-        comment = ""
-    comment = str(comment).strip()
-    
-    comment_u = comment.upper()
-    category_u = category.upper()
-    
-    # RULE 1: Positive confirmation - comment explicitly says EIN
-    if any(term in comment_u for term in ["EIN", "TAX ID", "EMPLOYER IDENTIFICATION"]):
-        return True
-    
-    # RULE 2: Block if comment mentions different identifier
-    other_identifiers = ["CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "TICKER", "SEC FILE"]
-    if any(other_id in comment_u for other_id in other_identifiers):
-        return False
-    
-    # RULE 3: Standard category-based check
-    context = f"{category_u} {comment_u}"
-    return any(
-        token in context
-        for token in ["COMPANY", "ENTITY", "TAX", "LEGAL", "IRS"]
-    )
-
 def validate_ein_anonymization(before: str, after: str) -> list[str]:
     issues = []
 
@@ -147,39 +114,6 @@ def looks_like_sec_file_number(value: str) -> bool:
         return False
     value = value.strip()
     return bool(SEC_FILE_REGEX.match(value))
-
-def sec_file_context_applies(category: str, comment: str = "") -> bool:
-    """
-    Context gate for SEC File Numbers with positive confirmation and cross-check blocking.
-    
-    Rules:
-    1. POSITIVE CONFIRMATION: Comment explicitly mentions "SEC FILE" or "FILE NUMBER" → FORCE ALLOW
-    2. EXPLICIT BLOCK: Comment mentions different identifier → FORCE BLOCK
-    3. CATEGORY + KEYWORD: Standard allow (SEC/FILING context)
-    """
-    # Handle NaN
-    if pd.isna(comment):
-        comment = ""
-    comment = str(comment).strip()
-    
-    comment_u = comment.upper()
-    category_u = category.upper()
-    
-    # RULE 1: Positive confirmation - comment explicitly mentions SEC file number
-    if any(term in comment_u for term in ["SEC FILE", "FILE NUMBER", "FILE NO", "FILING NUMBER"]):
-        return True
-    
-    # RULE 2: Block if comment mentions different identifier
-    other_identifiers = ["CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "TICKER", "EIN", "TAX ID"]
-    if any(other_id in comment_u for other_id in other_identifiers):
-        return False
-    
-    # RULE 3: Standard category-based check
-    context = f"{category_u} {comment_u}"
-    return any(
-        token in context
-        for token in ["SEC", "FILING", "FORM", "COMPANY INFO"]
-    )
 
 def validate_sec_file_anonymization(before: str, after: str) -> list[str]:
     issues = []
@@ -982,23 +916,40 @@ def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
         'rows': detected if len(issues) == 0 else issues
     }
 
-def ticker_comment_allows_detection(comment) -> bool:
+def ticker_comment_allows_detection(comment, category: str = "") -> bool:
     """
-    Inclusion-only rule for ticker detection.
+    Inclusion-only rule for ticker detection with cross-identifier blocking.
     - Empty comment → allow
     - Explicit ticker / market language → allow
+    - Other identifier explicitly mentioned → block
     - Anything else → block
     """
     # Handle NaN values from pandas
     if pd.isna(comment):
-        return True
+        comment = ""
+    if pd.isna(category):
+        category = ""
     
     # Convert to string and check if empty
     comment_str = str(comment).strip()
+    category_str = str(category).strip()
     if not comment_str or comment_str.lower() == 'nan':
-        return True
+        comment_str = ""
+    if not category_str or category_str.lower() == 'nan':
+        category_str = ""
 
     comment_u = comment_str.upper()
+    combined_context = f"{category_str.upper()} {comment_u}"
+    
+    # Block if other identifiers are explicitly mentioned
+    other_identifiers = ["CUSIP", "CIK", "ISIN", "SEDOL", "FIGI", "LEI", "EIN", "TAX ID", "EMPLOYER ID", "IRS", "SEC FILE", "FILE NUMBER"]
+    if any(other_id in combined_context for other_id in other_identifiers):
+        return False
+    
+    # Allow if empty or contains ticker-related terms
+    if not comment_str:
+        return True
+    
     return any(
         token in comment_u
         for token in [
@@ -1062,6 +1013,7 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
         "LEI": ["LEI", "LEGAL ENTITY IDENTIFIER"],
         "EIN": ["EIN", "TAX ID", "EMPLOYER IDENTIFICATION", "IRS", "EMPLOYER ID"],
         "SEC_FILE": ["SEC FILE", "FILE NUMBER", "FILE NO"],
+        "TICKER": ["TICKER", "STOCK SYMBOL"],
         "security": []  # Generic fallback
     }
     
@@ -1183,7 +1135,7 @@ def check_ticker_symbols(df: pd.DataFrame) -> Dict:
         if (
             ticker_context_applies(category)
             and re.match(r'^[A-Z]{1,5}$', before_val)
-            and ticker_comment_allows_detection(comment)
+            and ticker_comment_allows_detection(comment, category)
         ):
             has_ticker = True
             detected.append({
@@ -1215,7 +1167,7 @@ def check_ticker_symbols(df: pd.DataFrame) -> Dict:
         if (
             ticker_context_applies(category)
             and re.match(r'^[A-Z]{1,5}$', before_val)
-            and ticker_comment_allows_detection(comment)
+            and ticker_comment_allows_detection(comment, category)
             and after_val
         ):
             problem = None
