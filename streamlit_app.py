@@ -1052,8 +1052,7 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
     # Combine both for blocking checks
     combined_context = f"{category_u} {comment_u}"
     
-    # RULE 1: POSITIVE CONFIRMATION - If comment explicitly mentions THIS identifier, FORCE ALLOW
-    # This overrides everything else
+    # Identifier mapping for all checks
     identifier_map = {
         "CUSIP": ["CUSIP"],
         "CIK": ["CIK"],
@@ -1061,11 +1060,23 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
         "SEDOL": ["SEDOL"],
         "FIGI": ["FIGI", "BLOOMBERG"],
         "LEI": ["LEI", "LEGAL ENTITY IDENTIFIER"],
-        "EIN": ["EIN", "TAX ID", "EMPLOYER IDENTIFICATION"],
+        "EIN": ["EIN", "TAX ID", "EMPLOYER IDENTIFICATION", "IRS", "EMPLOYER ID"],
         "SEC_FILE": ["SEC FILE", "FILE NUMBER", "FILE NO"],
         "security": []  # Generic fallback
     }
     
+    # RULE 0: EXPLICIT BLOCKING - If comment/category explicitly mentions a DIFFERENT identifier, block
+    # This prevents cross-contamination (e.g., EIN being detected as CUSIP)
+    current_key = identifier_type.upper() if identifier_type.upper() in identifier_map else identifier_type
+    for other_id, terms in identifier_map.items():
+        if other_id == current_key or other_id == "security":
+            continue  # Skip checking against self
+        for term in terms:
+            if term in combined_context:
+                # Different identifier explicitly mentioned - block this detection
+                return False
+    
+    # RULE 1: POSITIVE CONFIRMATION - If comment explicitly mentions THIS identifier, FORCE ALLOW
     # Check if comment/category mentions THIS specific identifier type
     if identifier_type.upper() in identifier_map or identifier_type in identifier_map:
         key = identifier_type.upper() if identifier_type.upper() in identifier_map else identifier_type
