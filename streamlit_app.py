@@ -836,6 +836,7 @@ def check_sedol_ids(df: pd.DataFrame) -> Dict:
         before_val = str(row['Before']).strip() if pd.notna(row['Before']) else ''
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
         category = str(row['Category']) if pd.notna(row['Category']) else ''
+        comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
         if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEDOL", category) and detect_sedol(before_val) and after_val:
             problem = None
@@ -877,7 +878,7 @@ def check_ein_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_ein(before) and ein_context_applies(category, comment):
+        if looks_like_ein(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "EIN", category):
             has_ein = True
             detected.append({
                 'excel_row': idx + 2,
@@ -901,7 +902,7 @@ def check_ein_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_ein(before) and ein_context_applies(category, comment) and after:
+        if looks_like_ein(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "EIN", category) and after:
             for issue in validate_ein_anonymization(before, after):
                 issues.append({
                     'excel_row': idx + 2,
@@ -928,7 +929,7 @@ def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_sec_file_number(before) and sec_file_context_applies(category, comment):
+        if looks_like_sec_file_number(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEC_FILE", category):
             has_sec_file = True
             detected.append({
                 'excel_row': idx + 2,
@@ -952,7 +953,7 @@ def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_sec_file_number(before) and sec_file_context_applies(category, comment) and after:
+        if looks_like_sec_file_number(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEC_FILE", category) and after:
             for issue in validate_sec_file_anonymization(before, after):
                 issues.append({
                     'excel_row': idx + 2,
@@ -1103,6 +1104,28 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
             pass
         else:
             # No affirming terms - block ISIN detection
+            return False
+    
+    # EIN-SPECIFIC: Positive confirmation approach
+    # Only allow EIN detection if category/comment contains affirming terms
+    if identifier_type.upper() == "EIN":
+        ein_affirming_terms = ["EIN", "TAX ID", "EMPLOYER IDENTIFICATION", "TAX", "LEGAL", "IRS", "COMPANY", "ENTITY"]
+        if any(term in combined_context for term in ein_affirming_terms):
+            # Has affirming terms - proceed to other checks
+            pass
+        else:
+            # No affirming terms - block EIN detection
+            return False
+    
+    # SEC_FILE-SPECIFIC: Positive confirmation approach
+    # Only allow SEC file number detection if category/comment contains affirming terms
+    if identifier_type.upper() == "SEC_FILE":
+        sec_file_affirming_terms = ["SEC FILE", "FILE NUMBER", "FILE NO", "FILING NUMBER", "SEC", "FILING", "FORM", "COMPANY"]
+        if any(term in combined_context for term in sec_file_affirming_terms):
+            # Has affirming terms - proceed to other checks
+            pass
+        else:
+            # No affirming terms - block SEC file detection
             return False
     
     # RULE 2: EXPLICIT BLOCK - If comment/category mentions a DIFFERENT specific identifier type, BLOCK
