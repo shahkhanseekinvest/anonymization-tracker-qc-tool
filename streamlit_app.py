@@ -745,7 +745,7 @@ def check_cusip_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
-        if security_id_context_applies(category) and detect_cusip(before_val) and security_id_comment_allows_detection(comment, "CUSIP"):
+        if security_id_context_applies(category) and detect_cusip(before_val) and security_id_comment_allows_detection(comment, "CUSIP", category):
             has_cusip = True
             detected.append({
                 'excel_row': idx + 2,
@@ -773,7 +773,7 @@ def check_cusip_ids(df: pd.DataFrame) -> Dict:
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
         normalized_before = detect_cusip(before_val)
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CUSIP") and normalized_before and after_val:
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CUSIP", category) and normalized_before and after_val:
             problem = None
             normalized_after = detect_cusip(after_val)
             
@@ -1000,33 +1000,44 @@ def ticker_comment_allows_detection(comment) -> bool:
         ]
     )
 
-def security_id_comment_allows_detection(comment, identifier_type: str = "security") -> bool:
+def security_id_comment_allows_detection(comment, identifier_type: str = "security", category: str = "") -> bool:
     """
     Unified comment filter for security identifiers (CIK, CUSIP, ISIN, SEDOL, FIGI, LEI).
     
-    Prevents false positives and double counting by blocking detection when comment
-    suggests the value is something else (narrative text, names, addresses, etc.)
+    Prevents false positives and double counting by blocking detection when comment/category
+    suggests the value is something else (narrative text, names, addresses, other identifiers, etc.)
     
     Rules:
     1. POSITIVE CONFIRMATION: If comment explicitly mentions THIS identifier type → FORCE ALLOW
-    2. EXPLICIT BLOCK: If comment explicitly mentions DIFFERENT identifier type → FORCE BLOCK
-    3. NARRATIVE BLOCK: If comment contains narrative language → BLOCK
-    4. NEUTRAL/EMPTY: Allow (category gate is sufficient)
+    2. EXPLICIT BLOCK: If comment/category explicitly mentions DIFFERENT identifier type → FORCE BLOCK
+    3. SEC CONTEXT BLOCK: If category contains "SEC", block international IDs (ISIN, CUSIP, LEI, FIGI, SEDOL) but allow CIK
+    4. NARRATIVE BLOCK: If comment contains narrative language → BLOCK
+    5. NEUTRAL/EMPTY: Allow (category gate is sufficient)
     
     Args:
         comment: The comment field value
         identifier_type: The specific identifier being checked (e.g., "CUSIP", "CIK")
+        category: The category field value (optional, used for additional context)
     """
     # Handle NaN values from pandas
     if pd.isna(comment):
-        return True
+        comment = ""
+    if pd.isna(category):
+        category = ""
     
     # Convert to string and check if empty
     comment_str = str(comment).strip()
+    category_str = str(category).strip()
     if not comment_str or comment_str.lower() == 'nan':
-        return True
+        comment_str = ""
+    if not category_str or category_str.lower() == 'nan':
+        category_str = ""
     
     comment_u = comment_str.upper()
+    category_u = category_str.upper()
+    
+    # Combine both for blocking checks
+    combined_context = f"{category_u} {comment_u}"
     
     # RULE 1: POSITIVE CONFIRMATION - If comment explicitly mentions THIS identifier, FORCE ALLOW
     # This overrides everything else
@@ -1042,19 +1053,19 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
         "security": []  # Generic fallback
     }
     
-    # Check if comment mentions THIS specific identifier type
+    # Check if comment/category mentions THIS specific identifier type
     if identifier_type.upper() in identifier_map or identifier_type in identifier_map:
         key = identifier_type.upper() if identifier_type.upper() in identifier_map else identifier_type
         for term in identifier_map.get(key, []):
-            if term in comment_u:
+            if term in combined_context:
                 return True  # POSITIVE CONFIRMATION - explicitly mentioned
     
-    # RULE 2: EXPLICIT BLOCK - If comment mentions a DIFFERENT specific identifier type, BLOCK
+    # RULE 2: EXPLICIT BLOCK - If comment/category mentions a DIFFERENT specific identifier type, BLOCK
     other_identifiers = ["EIN", "TAX ID", "CIK", "CUSIP", "ISIN", "SEDOL", "FIGI", "LEI", 
-                         "TICKER", "STOCK SYMBOL", "SEC FILE", "FILE NUMBER"]
+                         "TICKER", "STOCK SYMBOL", "SEC FILE", "FILE NUMBER", "REGISTRATION", "FILING"]
     
     for other_id in other_identifiers:
-        if other_id in comment_u:
+        if other_id in combined_context:
             # This is a different identifier type - block detection
             # Exception: generic terms that might appear in multiple contexts
             if other_id not in ["ID", "NUMBER", "CODE"]:
@@ -1070,7 +1081,7 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
         "SETTLEMENT", "LAWSUIT", "LEGAL CASE"
     ]
     
-    if any(term in comment_u for term in block_terms):
+    if any(term in combined_context for term in block_terms):
         return False
     
     # RULE 4: NEUTRAL/EMPTY - ALLOW (generic security language or neutral)
