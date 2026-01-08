@@ -1005,21 +1005,21 @@ def ticker_comment_allows_detection(comment) -> bool:
 
 def security_id_comment_allows_detection(comment, identifier_type: str = "security", category: str = "") -> bool:
     """
-    Unified comment filter for security identifiers (CIK, CUSIP, ISIN, SEDOL, FIGI, LEI).
+    Unified comment filter for security identifiers (CIK, CUSIP, ISIN, SEDOL, FIGI, LEI, EIN, SEC_FILE).
     
-    Prevents false positives and double counting by blocking detection when comment/category
-    suggests the value is something else (narrative text, names, addresses, other identifiers, etc.)
+    Prevents false positives by using positive confirmation - only allows detection when
+    category/comment contains affirming terms for the specific identifier type.
     
     Rules:
-    1. POSITIVE CONFIRMATION: If comment explicitly mentions THIS identifier type → FORCE ALLOW
-    2. EXPLICIT BLOCK: If comment/category explicitly mentions DIFFERENT identifier type → FORCE BLOCK
-    3. SEC CONTEXT BLOCK: If category contains "SEC", block international IDs (ISIN, CUSIP, LEI, FIGI, SEDOL) but allow CIK
-    4. NARRATIVE BLOCK: If comment contains narrative language → BLOCK
-    5. NEUTRAL/EMPTY: Allow (category gate is sufficient)
+    1. POSITIVE CONFIRMATION: Check if category/comment contains affirming terms for THIS identifier
+       - If affirming terms present → proceed to other checks
+       - If no affirming terms → BLOCK (each identifier has specific affirming terms)
+    2. NARRATIVE BLOCK: Block if category/comment indicates narrative text (names, addresses, etc.)
+    3. NEUTRAL/EMPTY: Allow as fallback for generic contexts
     
     Args:
         comment: The comment field value
-        identifier_type: The specific identifier being checked (e.g., "CUSIP", "CIK")
+        identifier_type: The specific identifier being checked (e.g., "CUSIP", "CIK", "EIN", "SEC_FILE")
         category: The category field value (optional, used for additional context)
     """
     # Handle NaN values from pandas
@@ -1130,18 +1130,7 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
             # No affirming terms - block SEC file detection
             return False
     
-    # RULE 2: EXPLICIT BLOCK - If comment/category mentions a DIFFERENT specific identifier type, BLOCK
-    other_identifiers = ["EIN", "TAX ID", "CIK", "CUSIP", "ISIN", "SEDOL", "FIGI", "LEI", 
-                         "TICKER", "STOCK SYMBOL", "SEC FILE", "FILE NUMBER", "REGISTRATION", "FILING"]
-    
-    for other_id in other_identifiers:
-        if other_id in combined_context:
-            # This is a different identifier type - block detection
-            # Exception: generic terms that might appear in multiple contexts
-            if other_id not in ["ID", "NUMBER", "CODE"]:
-                return False
-    
-    # RULE 3: NARRATIVE BLOCK - Descriptive language that indicates this is NOT a security ID
+    # RULE 2: NARRATIVE BLOCK - Descriptive language that indicates this is NOT a security ID
     block_terms = [
         "NAME", "PERSON", "EXECUTIVE", "CEO", "CFO", "PRESIDENT",
         "ADDRESS", "STREET", "LOCATION", "CITY",
@@ -1154,9 +1143,9 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
     if any(term in combined_context for term in block_terms):
         return False
     
-    # RULE 4: NEUTRAL/EMPTY - ALLOW (generic security language or neutral)
-    # If we got here, comment doesn't explicitly mention any identifier
-    # and doesn't have blocking terms, so allow it
+    # RULE 3: NEUTRAL/EMPTY - ALLOW (generic security language or neutral)
+    # If we got here, positive confirmation didn't match and no blocking terms found
+    # This is the fallback for generic/neutral contexts
     return True
 
 def check_ticker_symbols(df: pd.DataFrame) -> Dict:
