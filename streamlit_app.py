@@ -140,7 +140,7 @@ def validate_ein_anonymization(before: str, after: str) -> list[str]:
 # -------------------------
 # SEC file number helpers
 # -------------------------
-SEC_FILE_REGEX = re.compile(r"^\d{3}-\d{5}$")
+SEC_FILE_REGEX = re.compile(r"^\d{3}-\d{5,6}$")
 
 def looks_like_sec_file_number(value: str) -> bool:
     if not isinstance(value, str):
