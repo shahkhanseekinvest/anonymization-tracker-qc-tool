@@ -1060,6 +1060,17 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
             if term in combined_context:
                 return True  # POSITIVE CONFIRMATION - explicitly mentioned
     
+    # CUSIP-SPECIFIC: Positive confirmation approach
+    # Only allow CUSIP detection if category/comment contains affirming terms
+    if identifier_type.upper() == "CUSIP":
+        cusip_affirming_terms = ["CUSIP", "COMPANY", "SECURITY", "FINANCIAL", "ISSUER"]
+        if any(term in combined_context for term in cusip_affirming_terms):
+            # Has affirming terms - proceed to other checks
+            pass
+        else:
+            # No affirming terms - block CUSIP detection
+            return False
+    
     # RULE 2: EXPLICIT BLOCK - If comment/category mentions a DIFFERENT specific identifier type, BLOCK
     other_identifiers = ["EIN", "TAX ID", "CIK", "CUSIP", "ISIN", "SEDOL", "FIGI", "LEI", 
                          "TICKER", "STOCK SYMBOL", "SEC FILE", "FILE NUMBER", "REGISTRATION", "FILING"]
