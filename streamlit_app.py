@@ -257,6 +257,16 @@ def detect_ein(val: str) -> Optional[str]:
 def detect_cik(val: str) -> Optional[str]:
     if not val:
         return None
+    
+    # Block if this looks like a phone number
+    # US/Canada phone numbers: 10 digits, often with area code patterns
+    try:
+        for match in phonenumbers.PhoneNumberMatcher(val, "US"):
+            # If phonenumbers library can parse it as a phone number, block it
+            return None
+    except:
+        pass
+    
     cleaned = re.sub(r'\s', '', val)
     return cleaned if re.match(r'^\d{7,10}$', cleaned) else None
 
