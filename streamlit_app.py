@@ -37,7 +37,9 @@ def security_id_context_applies(category: str, comment: str = "") -> bool:
             "SECURITY",
             "FINANCIAL",
             "ENTITY",
-            "ISSUER"
+            "ISSUER",
+            "EIN",
+            "TAX"
         ]
     )
 
