@@ -149,10 +149,10 @@ def detect_cusip(val: str) -> Optional[str]:
         return None
     cleaned = re.sub(r'[\s\-]', '', val).upper()
     # CUSIP: 9 characters total
-    # Standard: [0-9]{3}[0-9A-Z]{5}[0-9] (US/Canada)
-    # Regulation S: Can start with U, V, or Y for foreign issuers
-    # Pattern: [0-9A-Z]{3}[0-9A-Z]{5}[0-9]
-    return cleaned if re.match(r'^[0-9A-Z]{3}[0-9A-Z]{5}[0-9]$', cleaned) else None
+    # Conservative pattern: Must start with a digit (0-9)
+    # This prevents false positives on company names like "VantageS6"
+    # Format: First char 0-9, next 7 chars alphanumeric, last char is check digit (0-9)
+    return cleaned if re.match(r'^[0-9][0-9A-Z]{7}[0-9]$', cleaned) else None
 
 
 def detect_sedol(val: str) -> Optional[str]:
