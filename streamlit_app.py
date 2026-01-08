@@ -811,7 +811,7 @@ def check_sedol_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEDOL") and detect_sedol(before_val):
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEDOL", category) and detect_sedol(before_val):
             has_sedol = True
             detected.append({
                 'excel_row': idx + 2,
@@ -837,7 +837,7 @@ def check_sedol_ids(df: pd.DataFrame) -> Dict:
         after_val = str(row['After']).strip() if pd.notna(row['After']) else ''
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         
-        if security_id_context_applies(category) and detect_sedol(before_val) and after_val:
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEDOL", category) and detect_sedol(before_val) and after_val:
             problem = None
             
             if after_val.upper() in before_values and after_val.upper() != before_val.upper():
@@ -1069,6 +1069,17 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
             pass
         else:
             # No affirming terms - block CUSIP detection
+            return False
+    
+    # SEDOL-SPECIFIC: Positive confirmation approach
+    # Only allow SEDOL detection if category/comment contains affirming terms
+    if identifier_type.upper() == "SEDOL":
+        sedol_affirming_terms = ["SEDOL", "COMPANY", "SECURITY", "FINANCIAL", "ISSUER"]
+        if any(term in combined_context for term in sedol_affirming_terms):
+            # Has affirming terms - proceed to other checks
+            pass
+        else:
+            # No affirming terms - block SEDOL detection
             return False
     
     # RULE 2: EXPLICIT BLOCK - If comment/category mentions a DIFFERENT specific identifier type, BLOCK
