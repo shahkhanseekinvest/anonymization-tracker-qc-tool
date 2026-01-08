@@ -147,6 +147,12 @@ def detect_isin(val: str) -> Optional[str]:
 def detect_cusip(val: str) -> Optional[str]:
     if not val:
         return None
+    
+    # Block if this looks like an EIN (XX-XXXXXXX format)
+    # EINs can be mistaken for CUSIPs after normalization (e.g., "59-3157093" -> "593157093")
+    if re.match(r'^\d{2}-\d{7}$', val.strip()):
+        return None
+    
     cleaned = re.sub(r'[\s\-]', '', val).upper()
     # CUSIP: 9 characters total
     # Conservative pattern: Must start with a digit (0-9)
