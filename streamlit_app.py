@@ -616,7 +616,7 @@ def check_cik_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
-        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK"):
+        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK", category):
             has_cik = True
             detected.append({
                 'excel_row': idx + 2,
@@ -643,12 +643,12 @@ def check_cik_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
-        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK") and after_val:
+        if detect_cik(before_val) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "CIK", category) and after_val:
             problem = None
             
             if after_val.lower() in before_values and after_val.lower() != before_val.lower():
                 problem = f"After CIK '{after_val}' is a real identifier from Before column"
-            elif not after_val.isdigit():
+            elif not detect_cik(after_val):
                 problem = f"After value is not a valid CIK format (should be numeric)"
             elif len(before_val) != len(after_val):
                 problem = f"CIK length mismatch: {len(before_val)} digits → {len(after_val)} digits"
@@ -680,7 +680,7 @@ def check_isin_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
         
-        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "ISIN") and detect_isin(before_val):
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "ISIN", category) and detect_isin(before_val):
             has_isin = True
             detected.append({
                 'excel_row': idx + 2,
@@ -707,7 +707,7 @@ def check_isin_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         
         normalized_before = detect_isin(before_val)
-        if security_id_context_applies(category) and normalized_before and after_val:
+        if security_id_context_applies(category) and security_id_comment_allows_detection(comment, "ISIN", category) and normalized_before and after_val:
             problem = None
             normalized_after = detect_isin(after_val)
             
@@ -1080,6 +1080,29 @@ def security_id_comment_allows_detection(comment, identifier_type: str = "securi
             pass
         else:
             # No affirming terms - block SEDOL detection
+            return False
+    
+    # CIK-SPECIFIC: Positive confirmation approach
+    # Only allow CIK detection if category/comment contains affirming terms
+    # CIK is a SEC identifier, so we allow "SEC" context unlike CUSIP/SEDOL
+    if identifier_type.upper() == "CIK":
+        cik_affirming_terms = ["CIK", "COMPANY", "SECURITY", "FINANCIAL", "ISSUER", "SEC"]
+        if any(term in combined_context for term in cik_affirming_terms):
+            # Has affirming terms - proceed to other checks
+            pass
+        else:
+            # No affirming terms - block CIK detection
+            return False
+    
+    # ISIN-SPECIFIC: Positive confirmation approach
+    # Only allow ISIN detection if category/comment contains affirming terms
+    if identifier_type.upper() == "ISIN":
+        isin_affirming_terms = ["ISIN", "COMPANY", "SECURITY", "FINANCIAL", "ISSUER"]
+        if any(term in combined_context for term in isin_affirming_terms):
+            # Has affirming terms - proceed to other checks
+            pass
+        else:
+            # No affirming terms - block ISIN detection
             return False
     
     # RULE 2: EXPLICIT BLOCK - If comment/category mentions a DIFFERENT specific identifier type, BLOCK
