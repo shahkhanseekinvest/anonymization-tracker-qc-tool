@@ -74,7 +74,8 @@ def ticker_context_applies(category: str, comment: str = "") -> bool:
 EIN_REGEX_FORMATTED = re.compile(r"^\d{2}-\d{7}$")
 EIN_REGEX_UNFORMATTED = re.compile(r"^\d{9}$")
 
-def looks_like_ein(value: str) -> bool:
+def detect_ein(value: str) -> bool:
+    """Detect EIN with strict format validation (XX-XXXXXXX or XXXXXXXXX)"""
     if not isinstance(value, str):
         return False
     value = value.strip()
@@ -96,7 +97,7 @@ def validate_ein_anonymization(before: str, after: str) -> list[str]:
     if before_formatted != after_formatted:
         issues.append("EIN format not preserved (hyphen mismatch)")
 
-    if not looks_like_ein(after):
+    if not detect_ein(after):
         issues.append("Anonymized EIN has invalid format")
 
     if " " in after:
@@ -109,7 +110,8 @@ def validate_ein_anonymization(before: str, after: str) -> list[str]:
 # -------------------------
 SEC_FILE_REGEX = re.compile(r"^\d{3}-\d{5,6}$")
 
-def looks_like_sec_file_number(value: str) -> bool:
+def detect_sec_file(value: str) -> bool:
+    """Detect SEC file number with strict format validation (XXX-XXXXX or XXX-XXXXXX)"""
     if not isinstance(value, str):
         return False
     value = value.strip()
@@ -122,7 +124,7 @@ def validate_sec_file_anonymization(before: str, after: str) -> list[str]:
         issues.append("SEC file number not anonymized (Before == After)")
         return issues
 
-    if not looks_like_sec_file_number(after):
+    if not detect_sec_file(after):
         issues.append("Anonymized SEC file number has invalid format")
 
     if " " in after:
@@ -179,13 +181,6 @@ def detect_lei(val: str) -> Optional[str]:
         if has_letter and has_digit:
             return cleaned
     return None
-
-
-def detect_ein(val: str) -> Optional[str]:
-    if not val:
-        return None
-    cleaned = re.sub(r'[\s\-]', '', val)
-    return cleaned if re.match(r'^\d{9}$', cleaned) else None
 
 
 def detect_cik(val: str) -> Optional[str]:
@@ -824,7 +819,7 @@ def check_ein_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_ein(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "EIN", category):
+        if detect_ein(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "EIN", category):
             has_ein = True
             detected.append({
                 'excel_row': idx + 2,
@@ -848,7 +843,7 @@ def check_ein_ids(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_ein(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "EIN", category) and after:
+        if detect_ein(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "EIN", category) and after:
             for issue in validate_ein_anonymization(before, after):
                 issues.append({
                     'excel_row': idx + 2,
@@ -875,7 +870,7 @@ def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_sec_file_number(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEC_FILE", category):
+        if detect_sec_file(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEC_FILE", category):
             has_sec_file = True
             detected.append({
                 'excel_row': idx + 2,
@@ -899,7 +894,7 @@ def check_sec_file_numbers(df: pd.DataFrame) -> Dict:
         category = str(row['Category']) if pd.notna(row['Category']) else ''
         comment = str(row.get('Comment', '')) if 'Comment' in df.columns else ''
 
-        if looks_like_sec_file_number(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEC_FILE", category) and after:
+        if detect_sec_file(before) and security_id_context_applies(category) and security_id_comment_allows_detection(comment, "SEC_FILE", category) and after:
             for issue in validate_sec_file_anonymization(before, after):
                 issues.append({
                     'excel_row': idx + 2,
